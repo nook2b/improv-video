@@ -1,1 +1,35 @@
 # improv-video
+
+Insta360 Ace Pro 2 → YouTube: вставил карту — на YouTube появляется смонтированный ролик дня
+(«Тренировка ДД.ММ.ГГГГ» или «Занятие ДД.ММ.ГГГГ»).
+
+План: см. документ «Автоматизация: Insta360 Ace Pro 2 → YouTube (v3)».
+
+## Состояние
+
+Этап 1 (ядро), в работе. Готово:
+
+- поиск карты и клипов `DCIM/Camera*/VID_*.mp4`, день съёмки с границей 04:00;
+- склейка кусков одной записи, журнал состояния в SQLite, «часть 2» при досъёмке;
+- проверка места и копирование в архив с проверкой размера;
+- автояркость (замер раз в 2 с, поправка в стопах до LUT, ±0.5 стопа), LUT, 10 бит, BT.709;
+- звук: каждый клип точно по длине видео, шумодав (afftdn / RNNoise / DeepFilterNet), loudnorm −14 LUFS;
+- HEVC Main10 с выбором кодировщика по железу, склейка без перекодирования.
+
+Ещё нет: загрузка на YouTube, интерфейс, сборка приложений.
+
+## Запуск из командной строки
+
+Нужны Python 3.11+ и ffmpeg в PATH.
+
+```
+python -m improv_video --archive ~/Footage --lut ilog.cube import /Volumes/CARD --kind training
+python -m improv_video --archive ~/Footage build ~/Footage/2026-10-01 --kind lesson
+```
+
+## Тесты
+
+```
+pip install pytest
+python -m pytest
+```
