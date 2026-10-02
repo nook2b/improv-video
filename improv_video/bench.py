@@ -18,13 +18,13 @@ FRAMES = 120
 
 CHAINS = {
     "только декод": "null",
-    "сейчас (3 пересчёта)": (
+    "было (3 пересчёта)": (
         "scale=in_range=pc:out_range=tv:in_color_matrix=bt709:out_color_matrix=bt709,format=yuv420p10le,"
         "lutyuv=y='clip(val+48,minval,maxval)',scale=in_color_matrix=bt709:in_range=tv,format=gbrp10le,"
         "lut3d=file=lut.cube:interp=tetrahedral,"
         "scale=3840:2160:force_original_aspect_ratio=decrease:flags=lanczos:in_color_matrix=bt709:"
         "out_color_matrix=bt709:out_range=tv,pad=3840:2160:(ow-iw)/2:(oh-ih)/2:color=black,setsar=1,format=p010le"),
-    "2 пересчёта, gbrp10": (
+    "сейчас (2 пересчёта, LUT с поправкой)": (
         "scale=in_range=pc:in_color_matrix=bt709,format=gbrp10le,lut3d=file=lut.cube:interp=tetrahedral,"
         "scale=out_color_matrix=bt709:out_range=tv,format=p010le"),
     "2 пересчёта, float": (
@@ -80,6 +80,27 @@ def main(argv: list[str]) -> int:
                 for p in procs:
                     p.wait()
                 print(f"{best[0]} × {n} параллельно: {n * FRAMES / (time.monotonic() - t0):.1f} к/с суммарно", flush=True)
+        # Полная сборка: 20 с 4K I-Log полного диапазона, куски по 5 с, параллельно
+        from datetime import date
+
+        from .pipeline import Settings, auto_workers, build_day
+
+        day_clip = work / "VID_20261001_180000_00_001.mp4"
+        ffmpeg(["-f", "lavfi", "-i", "testsrc2=s=3840x2160:r=30000/1001:d=20", "-f", "lavfi",
+                "-i", "sine=f=300:d=20:sample_rate=48000", "-vf", "scale=out_range=pc", "-pix_fmt", "yuvj420p",
+                "-c:v", "libx265", "-preset", "ultrafast", "-x265-params", "log-level=error",
+                "-c:a", "aac", "-ac", "2", str(day_clip)])
+        for workers in (1, auto_workers()):
+            settings = Settings(archive=work, lut=work / "lut.cube", profile="ilog", denoise="medium",
+                                rnnoise_model=resources_dir() / "rnnoise" / "bd.rnnn", workers=workers,
+                                chunk_seconds=5)
+            t0 = time.monotonic()
+            r = build_day(date(2026, 10, 1), [day_clip], "training", 1, settings, work / f"day{workers}.mp4",
+                          notify=lambda _: None)
+            dt = time.monotonic() - t0
+            frames = 20 * 30000 / 1001
+            print(f"полная сборка ({workers} процесс.): {frames / dt:.1f} к/с, "
+                  f"2 часа видео ≈ {2 * 3600 * 30000 / 1001 / (frames / dt) / 3600:.1f} ч ({r.encoder})", flush=True)
     return 0
 
 

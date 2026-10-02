@@ -101,30 +101,51 @@ def choose_target(medias: list[Media], max_height: int = 2160) -> Target:
 
 
 def video_filter(target: Target, encoder: str, lut_name: str | None, adjust: str | None,
-                 src_range: str = "tv") -> str:
-    """Порядок: 10 бит, ограниченный диапазон → поправка яркости → LUT → масштаб с полями → FPS."""
-    steps = [normalize_filter(src_range)]
-    if adjust:
-        steps.append(adjust)
-    if lut_name:
-        steps += [
-            "scale=in_color_matrix=bt709:in_range=tv",
-            "format=gbrp10le",
-            f"lut3d=file={lut_name}:interp=tetrahedral",
-        ]
+                 src_range: str = "tv", src_size: tuple[int, int] | None = None) -> str:
+    """Цепочка на кадр.
+
+    С LUT — два пересчёта цвета: вход (8 бит, полный диапазон) → RGB 10 бит → LUT (поправка
+    яркости уже запечена в нём) → YUV 10 бит BT.709 с масштабом, если размер отличается.
+    Без LUT — приведение к 10 битам, поправка яркости кривой, масштаб.
+    """
     w, h = target.width, target.height
-    steps += [
-        f"scale={w}:{h}:force_original_aspect_ratio=decrease:flags=lanczos"
-        ":in_color_matrix=bt709:out_color_matrix=bt709:out_range=tv",
-        f"pad={w}:{h}:(ow-iw)/2:(oh-ih)/2:color=black",
-        "setsar=1",
-        f"fps={target.fps.numerator}/{target.fps.denominator}",
-        f"format={_pix_fmt(encoder)}",
-    ]
+    same = src_size == (w, h)
+    rng = "pc" if src_range == "pc" else "tv"
+    if lut_name:
+        steps = [f"scale=in_range={rng}:in_color_matrix=bt709", "format=gbrp10le",
+                 f"lut3d=file={lut_name}:interp=tetrahedral"]
+        if adjust:
+            steps.insert(0, adjust)
+        size = "" if same else f"{w}:{h}:force_original_aspect_ratio=decrease:flags=lanczos:"
+        steps.append(f"scale={size}out_color_matrix=bt709:out_range=tv")
+    else:
+        steps = [normalize_filter(src_range)]
+        if adjust:
+            steps.append(adjust)
+        if not same:
+            steps.append(f"scale={w}:{h}:force_original_aspect_ratio=decrease:flags=lanczos"
+                         ":in_color_matrix=bt709:out_color_matrix=bt709:out_range=tv")
+    if not same:
+        steps.append(f"pad={w}:{h}:(ow-iw)/2:(oh-ih)/2:color=black")
+    steps += ["setsar=1", f"fps={target.fps.numerator}/{target.fps.denominator}", f"format={_pix_fmt(encoder)}"]
     return ",".join(steps)
 
 
-def encode_recording(
+def plan_chunks(duration: float, fps: Fraction, chunk_seconds: float = 300) -> list[tuple[int, int]]:
+    """Делит запись на куски по ~chunk_seconds: (первый кадр, число кадров). Сумма кадров точная."""
+    total = max(1, round(duration * fps))
+    per = max(1, round(chunk_seconds * fps))
+    if total <= per * 1.5:
+        return [(0, total)]
+    chunks, start = [], 0
+    while start < total:
+        count = per if total - start - per >= per // 2 else total - start
+        chunks.append((start, count))
+        start += count
+    return chunks
+
+
+def encode_chunk(
     clips: list[Path],
     out: Path,
     target: Target,
@@ -133,25 +154,48 @@ def encode_recording(
     adjust: str | None = None,
     x265_preset: str = "medium",
     src_range: str = "tv",
+    src_size: tuple[int, int] | None = None,
+    start_frame: int = 0,
+    frames: int | None = None,
 ) -> Path:
-    """Кодирует одну запись (все её куски) без звука."""
+    """Кодирует кусок записи без звука: кадры [start_frame, start_frame + frames) на сетке target.fps."""
     out = Path(out).resolve()
     work = out.parent
     lut_name = None
     if lut:
-        lut_name = "lut" + Path(lut).suffix.lower()
-        if Path(lut).resolve() != (work / lut_name).resolve():
+        lut_name = Path(lut).resolve().name
+        if Path(lut).resolve().parent != work:
             shutil.copyfile(lut, work / lut_name)
     lst = concat_list(clips, out.with_suffix(".txt"))
+    seek = ["-ss", f"{float(Fraction(start_frame) / target.fps):.6f}"] if start_frame else []
+    count = ["-frames:v", str(frames)] if frames else []
     ffmpeg(
         [
-            *decode_args(), "-f", "concat", "-safe", "0", "-i", str(lst), "-map", "0:v:0", "-an",
-            "-vf", video_filter(target, encoder, lut_name, adjust, src_range),
-            *encoder_args(encoder, bitrate_for(target), x265_preset),
+            *decode_args(), *seek, "-f", "concat", "-safe", "0", "-i", str(lst), "-map", "0:v:0", "-an",
+            "-vf", video_filter(target, encoder, lut_name, adjust, src_range, src_size),
+            *count, *encoder_args(encoder, bitrate_for(target), x265_preset),
             str(out),
         ],
         cwd=work,
     )
+    return out
+
+
+def encode_recording(clips: list[Path], out: Path, target: Target, encoder: str, lut: Path | None = None,
+                     adjust: str | None = None, x265_preset: str = "medium", src_range: str = "tv",
+                     src_size: tuple[int, int] | None = None) -> Path:
+    """Вся запись одним куском (без деления)."""
+    return encode_chunk(clips, out, target, encoder, lut, adjust, x265_preset, src_range, src_size)
+
+
+def concat_video(parts: list[Path], out: Path) -> Path:
+    if len(parts) == 1:
+        Path(parts[0]).replace(out)
+        return out
+    lst = concat_list(parts, out.with_name(out.stem + "_parts.txt"))
+    ffmpeg(["-f", "concat", "-safe", "0", "-i", str(lst), "-c", "copy", "-tag:v", "hvc1", str(out)])
+    for p in parts:
+        Path(p).unlink(missing_ok=True)
     return out
 
 

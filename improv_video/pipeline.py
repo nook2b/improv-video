@@ -5,12 +5,13 @@ from __future__ import annotations
 import os
 import shutil
 import tempfile
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from datetime import date, datetime, time
 from pathlib import Path
 from typing import Callable
 
-from . import audio, brightness, video
+from . import audio, brightness, lut as lutlib, video
 from .grouping import Part, Recording, group_days, group_recordings
 from .naming import DEFAULT_DAY_START, description, shooting_day, title
 from .probe import probe
@@ -37,6 +38,12 @@ class Settings:
     day_start: time = DEFAULT_DAY_START
     x265_preset: str = "medium"
     encoders: tuple[str, ...] | None = None
+    workers: int = 0  # параллельных процессов кодирования; 0 — по числу ядер (до 4)
+    chunk_seconds: float = 300  # длинные записи делятся на куски для параллельного кодирования
+
+
+def auto_workers() -> int:
+    return min(4, max(1, (os.cpu_count() or 1) // 3))
 
 
 @dataclass
@@ -148,23 +155,57 @@ def build_day(
             day_stops = _solve_brightness([p.clip.path for r in recordings for p in r.parts],
                                           sum(r.duration for r in recordings), settings, work / "samples.mkv",
                                           recordings[0].parts[0].media.color_range)
-        segments, rec_wavs, stops_used = [], [], []
+        # 1. Поправка яркости для каждой записи
+        stops_used = []
         for i, rec in enumerate(recordings, 1):
-            notify(f"Запись {i} из {len(recordings)}")
-            paths = [p.clip.path for p in rec.parts]
             if day_stops is not None:
-                stops = day_stops
+                stops_used.append(day_stops)
             elif settings.auto_brightness:
-                stops = _solve_brightness(paths, rec.duration, settings, work / f"samples{i}.mkv",
-                                          rec.parts[0].media.color_range)
+                stops_used.append(_solve_brightness([p.clip.path for p in rec.parts], rec.duration, settings,
+                                                    work / f"samples{i}.mkv", rec.parts[0].media.color_range))
             else:
-                stops = 0.0
-            stops_used.append(stops)
-            seg = video.encode_recording(
-                paths, work / f"rec{i}.mp4", target, encoder, settings.lut,
-                brightness.adjust_filter(settings.profile, stops), settings.x265_preset,
-                rec.parts[0].media.color_range,
-            )
+                stops_used.append(0.0)
+
+        # 2. Для I-Log с LUT поправка запекается в LUT: на 4K-кадр меньше проходов
+        baked: dict[float, Path] = {}
+
+        def color_for(stops: float) -> tuple[Path | None, str | None]:
+            if settings.lut and settings.profile == "ilog":
+                if abs(stops) < 1e-3:
+                    return settings.lut, None
+                if stops not in baked:
+                    offset = stops * brightness.ILOG_CODES_PER_STOP / 876
+                    baked[stops] = lutlib.bake_offset(settings.lut, work / f"lut_{len(baked)}.cube", offset)
+                return baked[stops], None
+            return settings.lut, brightness.adjust_filter(settings.profile, stops)
+
+        # 3. Куски всех записей кодируются параллельно
+        jobs = []
+        for i, rec in enumerate(recordings, 1):
+            lut_file, adjust = color_for(stops_used[i - 1])
+            m = rec.parts[0].media
+            for j, (start, frames) in enumerate(video.plan_chunks(rec.duration, target.fps, settings.chunk_seconds)):
+                jobs.append((i, j, dict(clips=[p.clip.path for p in rec.parts], out=work / f"rec{i}_{j:03d}.mp4",
+                                        target=target, encoder=encoder, lut=lut_file, adjust=adjust,
+                                        x265_preset=settings.x265_preset, src_range=m.color_range,
+                                        src_size=(m.width, m.height), start_frame=start, frames=frames)))
+        done = 0
+
+        def run(job):
+            nonlocal done
+            path = video.encode_chunk(**job[2])
+            done += 1
+            notify(f"Кодирование: {done} из {len(jobs)}")
+            return path
+
+        notify(f"Кодирование: 0 из {len(jobs)}")
+        with ThreadPoolExecutor(max_workers=settings.workers or auto_workers()) as pool:
+            outputs = list(pool.map(run, jobs))
+
+        segments, rec_wavs = [], []
+        for i, rec in enumerate(recordings, 1):
+            parts = [o for (ri, _, _), o in zip(jobs, outputs) if ri == i]
+            seg = video.concat_video(parts, work / f"rec{i}.mp4")
             segments.append(seg)
             # Звук записи: каждый кусок по длине своего видео, затем вся запись — по длине сегмента.
             piece_wavs = [
