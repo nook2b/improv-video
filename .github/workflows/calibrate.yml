@@ -1,11 +1,9 @@
 name: calibrate
 
+# Запуск: записать ID файла Google Drive (доступ по ссылке) в calibration/drive_id.txt и запушить.
 on:
-  workflow_dispatch:
-    inputs:
-      drive_id:
-        description: "ID файла на Google Drive (доступ по ссылке)"
-        required: true
+  push:
+    paths: ["calibration/drive_id.txt", "tools/calibrate.py", ".github/workflows/calibrate.yml"]
 
 jobs:
   calibrate:
@@ -19,7 +17,8 @@ jobs:
       - run: pip install -r requirements.txt
       - name: Скачать клип с Google Drive
         run: |
-          curl -sSL -o clip.mp4 "https://drive.usercontent.google.com/download?id=${{ inputs.drive_id }}&export=download&confirm=t"
+          ID=$(tr -d '[:space:]' < calibration/drive_id.txt)
+          curl -sSL -o clip.mp4 "https://drive.usercontent.google.com/download?id=$ID&export=download&confirm=t"
           ls -la clip.mp4
           file clip.mp4
       - name: Калибровка
