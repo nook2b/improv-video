@@ -97,6 +97,31 @@ def main(clip: Path, lut: Path, out: Path) -> None:
                        "-frames:v", "1", f"{name}.png"], cwd=out)
     print("кадры:", ", ".join(n + ".png" for n, _ in variants))
 
+    section("Автоцвет против «Авто» Lumetri (кадр 00:00:00)")
+    from improv_video import autocolor
+    auto_lut, grade = autocolor.solve(samples, lut, work)
+    print("автоцвет:", grade.describe())
+    shutil.copyfile(auto_lut, out / "auto.cube")
+    ref = Path(__file__).resolve().parent.parent / "calibration" / "ref_lumetri_auto.png"
+    shutil.copyfile(ref, out / "0_lumetri_auto_t0.png")
+    rng = "pc" if m.color_range == "pc" else "tv"
+    for name, cube in (("4_lut_only_t0", lut_name), ("5_auto_t0", "auto.cube")):
+        run("ffmpeg", ["-y", "-i", str(clip), "-frames:v", "1", "-vf",
+                       f"scale=in_range={rng}:in_color_matrix=bt709,format=gbrp10le,lut3d=file={cube}:interp=tetrahedral,"
+                       "scale=1280:-2:out_color_matrix=bt709,format=rgb24", f"{name}.png"], cwd=out)
+
+    import subprocess
+    from improv_video.tools import find_tool
+    for name in ("0_lumetri_auto_t0", "4_lut_only_t0", "5_auto_t0"):
+        data = subprocess.run([find_tool("ffmpeg"), "-v", "error", "-i", str(out / f"{name}.png"), "-vf", "scale=195:108",
+                               "-f", "rawvideo", "-pix_fmt", "rgb24", "-"], capture_output=True).stdout
+        px = [(data[i] / 255, data[i + 1] / 255, data[i + 2] / 255) for i in range(0, len(data) - 2, 3)]
+        lum = sorted(autocolor._luma(p) for p in px)
+        mean = sum(lum) / len(lum)
+        rgb = [sum(p[c] for p in px) / len(px) for c in range(3)]
+        print(f"{name}: средняя {mean:.3f}, медиана {autocolor._pct(lum, .5):.3f}, чёрные(1%) {autocolor._pct(lum, .01):.3f}, "
+              f"белые(99.5%) {autocolor._pct(lum, .995):.3f}, RGB {rgb[0]:.3f}/{rgb[1]:.3f}/{rgb[2]:.3f}")
+
     section("Скорость цветовой обработки 4K (без кодирования, 150 кадров)")
     from improv_video.video import Target, video_filter
     t4k = Target(3840, 2160, m.fps)

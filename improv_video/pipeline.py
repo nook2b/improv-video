@@ -11,7 +11,7 @@ from datetime import date, datetime, time
 from pathlib import Path
 from typing import Callable
 
-from . import audio, brightness, lut as lutlib, video
+from . import audio, autocolor, brightness, lut as lutlib, video
 from .grouping import Part, Recording, group_days, group_recordings
 from .naming import DEFAULT_DAY_START, description, shooting_day, title
 from .probe import probe
@@ -56,6 +56,7 @@ class BuildResult:
     duration: float
     encoder: str
     brightness_stops: list[float] = field(default_factory=list)
+    color: str = ""  # что сделал автоцвет
 
 
 class NotEnoughSpace(RuntimeError):
@@ -149,27 +150,39 @@ def build_day(
     out = Path(out).resolve()
     with tempfile.TemporaryDirectory(prefix="improv-", dir=out.parent) as tmp:
         work = Path(tmp)
-        day_stops = None
-        if settings.auto_brightness and settings.brightness_scope == "day":
-            notify("Замер яркости")
-            day_stops = _solve_brightness([p.clip.path for r in recordings for p in r.parts],
-                                          sum(r.duration for r in recordings), settings, work / "samples.mkv",
-                                          recordings[0].parts[0].media.color_range)
-        # 1. Поправка яркости для каждой записи
-        stops_used = []
-        for i, rec in enumerate(recordings, 1):
-            if day_stops is not None:
-                stops_used.append(day_stops)
-            elif settings.auto_brightness:
-                stops_used.append(_solve_brightness([p.clip.path for p in rec.parts], rec.duration, settings,
-                                                    work / f"samples{i}.mkv", rec.parts[0].media.color_range))
-            else:
-                stops_used.append(0.0)
+        all_paths = [p.clip.path for r in recordings for p in r.parts]
+        total = sum(r.duration for r in recordings)
+        src_range = recordings[0].parts[0].media.color_range
+        auto_lut, color_note = None, ""
+        if settings.auto_brightness and settings.lut and settings.profile == "ilog":
+            # Автоцвет как «Авто» в Lumetri: одна оценка на день, всё запекается в LUT
+            notify("Автоцвет: замер")
+            samples = brightness.sample_frames(all_paths, work / "samples.mkv", max(2.0, total / 600), src_range)
+            auto_lut, grade = autocolor.solve(samples, settings.lut, work)
+            color_note = grade.describe()
+            notify("Автоцвет: " + color_note)
+            stops_used = [grade.stops] * len(recordings)
+        else:
+            day_stops = None
+            if settings.auto_brightness and settings.brightness_scope == "day":
+                notify("Замер яркости")
+                day_stops = _solve_brightness(all_paths, total, settings, work / "samples.mkv", src_range)
+            stops_used = []
+            for i, rec in enumerate(recordings, 1):
+                if day_stops is not None:
+                    stops_used.append(day_stops)
+                elif settings.auto_brightness:
+                    stops_used.append(_solve_brightness([p.clip.path for p in rec.parts], rec.duration, settings,
+                                                        work / f"samples{i}.mkv", rec.parts[0].media.color_range))
+                else:
+                    stops_used.append(0.0)
 
-        # 2. Для I-Log с LUT поправка запекается в LUT: на 4K-кадр меньше проходов
+        # Для I-Log с LUT поправка запекается в LUT: на 4K-кадр меньше проходов
         baked: dict[float, Path] = {}
 
         def color_for(stops: float) -> tuple[Path | None, str | None]:
+            if auto_lut:
+                return auto_lut, None
             if settings.lut and settings.profile == "ilog":
                 if abs(stops) < 1e-3:
                     return settings.lut, None
@@ -231,6 +244,7 @@ def build_day(
         duration=probe(out).duration,
         encoder=encoder,
         brightness_stops=stops_used,
+        color=color_note,
     )
 
 

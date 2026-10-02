@@ -3,7 +3,8 @@ name: calibrate
 # Запуск: записать ID файла Google Drive (доступ по ссылке) в calibration/drive_id.txt и запушить.
 on:
   push:
-    paths: ["calibration/drive_id.txt", "tools/calibrate.py", ".github/workflows/calibrate.yml"]
+    paths: ["calibration/drive_id.txt", "tools/calibrate.py", ".github/workflows/calibrate.yml",
+            "improv_video/autocolor.py"]
 
 jobs:
   calibrate:
@@ -29,4 +30,5 @@ jobs:
           name: calibration
           path: |
             out/*.png
+            out/auto.cube
             out/preview.mp4
