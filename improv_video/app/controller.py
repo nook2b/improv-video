@@ -186,6 +186,11 @@ class Controller:
         self._save_config()
         self._do_deliver()
 
+    def _do_forget_skipped(self) -> None:
+        n = self.state.forget_skipped()
+        self._say("improv-video", f"Отметка снята с {n} клипов. Вставьте флешку заново — их можно будет обработать."
+                  if n else "Клипов с отметкой «обработано» нет.")
+
     # ---------- выдача ролика ----------
 
     def _do_deliver(self) -> None:

@@ -75,6 +75,17 @@ def test_first_run_can_skip(card, tmp_path):
     assert any("помечены как обработанные" in t for _, t in ui.notes)
 
 
+def test_forget_skipped_returns_clips(card, tmp_path):
+    ui = FakeUI({"первый запуск": "Считать обработанными"})
+    c = make_controller(tmp_path, ui)
+    c.submit("source", card)
+    c.wait_idle()
+    c.submit("forget_skipped")
+    c.wait_idle()
+    c.stop()
+    assert any("Отметка снята с 5 клипов" in t for _, t in ui.notes)
+
+
 def _fast_settings(original):
     def settings(self):
         s = original(self)

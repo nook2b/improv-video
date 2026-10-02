@@ -42,6 +42,7 @@ class MenuBarApp(rumps.App):
             rumps.MenuItem("Обработать папку с клипами…", callback=self.process_folder),
             self.manual_menu,
             rumps.MenuItem("Открыть архив", callback=lambda _: macos.open_path(self.config.archive)),
+            rumps.MenuItem("Вернуть клипы, отмеченные как обработанные…", callback=self.forget_skipped),
             None,
             rumps.MenuItem("Войти в YouTube…", callback=lambda _: self.controller.submit("login")),
             rumps.MenuItem("Проверить загрузку на YouTube…", callback=self.test_upload),
@@ -103,6 +104,13 @@ class MenuBarApp(rumps.App):
     def toggle_login_item(self, _):
         macos.set_launch_at_login(not macos.launch_at_login_enabled())
         self._refresh_checks()
+
+    @_in_thread
+    def forget_skipped(self, _):
+        answer = macos.dialog("Клипы, которые при первом запуске были отмечены «Считать обработанными», "
+                              "снова станут новыми. Продолжить?", ["Отмена", "Вернуть"], default="Вернуть")
+        if answer == "Вернуть":
+            self.controller.submit("forget_skipped")
 
     @_in_thread
     def process_folder(self, _):

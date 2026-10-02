@@ -50,11 +50,17 @@ def dialog(text: str, buttons: list[str], default: str | None = None, title: str
 
 
 def choose_file(prompt: str, extensions: list[str] | None = None) -> Path | None:
-    script = f"POSIX path of (choose file with prompt {_q(prompt)}"
-    if extensions:
-        script += " of type {" + ", ".join(_q(e) for e in extensions) + "}"
-    out = osascript(script + ")")
-    return Path(out) if out else None
+    """Окно выбора файла. Фильтр по типу не ставим: у .cube нет системного типа, и macOS
+    делает такие файлы неактивными. Расширение проверяем сами и переспрашиваем при ошибке."""
+    while True:
+        out = osascript(f"POSIX path of (choose file with prompt {_q(prompt)})")
+        if not out:
+            return None
+        path = Path(out)
+        if not extensions or path.suffix.lower().lstrip(".") in {e.lower() for e in extensions}:
+            return path
+        need = ", ".join("." + e for e in extensions)
+        osascript(f"display alert {_q('Нужен файл ' + need)} message {_q(path.name + ' не подходит')}")
 
 
 def choose_folder(prompt: str) -> Path | None:

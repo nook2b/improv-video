@@ -55,6 +55,11 @@ class State:
                 (name, size, day.isoformat(), status),
             )
 
+    def forget_skipped(self) -> int:
+        """Снимает отметку «уже обработан» с клипов первого запуска; их снова можно импортировать."""
+        with self.db:
+            return self.db.execute("DELETE FROM clips WHERE status = 'skipped'").rowcount
+
     def unassigned_clips(self, day: date) -> list[str]:
         rows = self.db.execute(
             "SELECT name FROM clips WHERE day = ? AND status = 'copied' AND video IS NULL ORDER BY name",
