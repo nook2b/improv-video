@@ -97,6 +97,19 @@ def main(clip: Path, lut: Path, out: Path) -> None:
                        "-frames:v", "1", f"{name}.png"], cwd=out)
     print("кадры:", ", ".join(n + ".png" for n, _ in variants))
 
+    section("Скорость цветовой обработки 4K (без кодирования, 150 кадров)")
+    from improv_video.video import Target, video_filter
+    t4k = Target(3840, 2160, m.fps)
+    vf = video_filter(t4k, "libx265", lut_name, adj, m.color_range)
+    for label, extra in (("как в приложении", []), ("с -filter_threads 8", ["-filter_threads", "8"])):
+        t0 = time.monotonic()
+        run("ffmpeg", ["-y", *extra, "-i", str(clip), "-frames:v", "150", "-vf", vf, "-an", "-f", "null", "-"], cwd=out)
+        dt = time.monotonic() - t0
+        print(f"{label}: {150 / dt:.1f} к/с (с декодированием)")
+    t0 = time.monotonic()
+    run("ffmpeg", ["-y", "-i", str(clip), "-frames:v", "150", "-an", "-f", "null", "-"])
+    print(f"только декодирование: {150 / (time.monotonic() - t0):.1f} к/с")
+
     section("Превью полного конвейера (первые 20 с, 1080p)")
     vid = work / "VID_20261001_180000_00_001.mp4"
     ffmpeg(["-i", str(clip), "-t", "20", "-c", "copy", str(vid)])
