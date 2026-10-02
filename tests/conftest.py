@@ -28,13 +28,19 @@ def make_clip(path: Path, seconds: float, size="640x360", audio_seconds: float |
 def card(tmp_path_factory) -> Path:
     root = tmp_path_factory.mktemp("card")
     cam = root / "DCIM" / "Camera01"
-    make_clip(cam / "VID_20261001_180500_00_001.mp4", 3, audio_seconds=2.5)  # звук короче видео
-    make_clip(cam / "VID_20261001_180503_00_002.mp4", 3)  # продолжение той же записи
-    make_clip(cam / "VID_20261001_183000_00_003.mp4", 2, audio_seconds=0)  # без звука
-    make_clip(cam / "VID_20261002_013000_00_004.mp4", 2)  # после полуночи → день 01.10
-    make_clip(cam / "VID_20261003_120000_00_005.mp4", 2, size="360x640")  # вертикальное
-    (cam / "LRV_20261001_180500_01_001.lrv").write_bytes(b"proxy")
-    (cam / "IMG_20261001_180000_00_006.jpg").write_bytes(b"photo")
+    # Ace Pro 2: куски одной записи — с одинаковым временем в имени, разный только номер.
+    make_clip(cam / "VID_20261001_180500_00_578.mp4", 3, audio_seconds=2.5)  # звук короче видео
+    make_clip(cam / "VID_20261001_180500_00_579.mp4", 3)  # продолжение той же записи
+    make_clip(cam / "VID_20261001_183000_00_580.mp4", 2, audio_seconds=0)  # без звука
+    make_clip(cam / "VID_20261002_013000_00_581.mp4", 2)  # после полуночи → день 01.10
+    make_clip(cam / "VID_20261003_120000_00_582.mp4", 2, size="360x640")  # вертикальное
+    # Копия Finder того же файла — должна быть отброшена.
+    (cam / "VID_20261001_180500_00_579 2.mp4").write_bytes((cam / "VID_20261001_180500_00_579.mp4").read_bytes())
+    for junk in ("LRV_20261001_180500_11_578.lrv", "LRV_20261001_180500_11_578_thumbnail.bin",
+                 "VID_20261001_180500_00_578_metadata.bin", "VID_20261001_180500_00_578_thumbnail.bin",
+                 "IMG_20261001_180000_00_583.jpg"):
+        (cam / junk).write_bytes(b"x")
+    (root / "DCIM" / "fileinfo_list.list").write_bytes(b"x")
     return root
 
 

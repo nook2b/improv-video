@@ -31,6 +31,7 @@ class Settings:
     denoise: str = "weak"  # off | weak | medium | strong
     rnnoise_model: Path | None = None
     auto_brightness: bool = True
+    brightness_scope: str = "day"  # day — одна поправка на весь день (ровный свет) | recording
     target_luma: float = brightness.TARGET_LUMA
     max_height: int = 2160
     day_start: time = DEFAULT_DAY_START
@@ -44,6 +45,7 @@ class BuildResult:
     title: str
     description: str
     recorded_at: datetime
+    recorded_end: datetime
     duration: float
     encoder: str
     brightness_stops: list[float] = field(default_factory=list)
@@ -132,15 +134,21 @@ def build_day(
 
     with tempfile.TemporaryDirectory(prefix="improv-", dir=out.parent) as tmp:
         work = Path(tmp)
+        day_stops = None
+        if settings.auto_brightness and settings.brightness_scope == "day":
+            notify("Замер яркости")
+            day_stops = _solve_brightness([p.clip.path for r in recordings for p in r.parts],
+                                          sum(r.duration for r in recordings), settings, work / "samples.mkv")
         segments, rec_wavs, stops_used = [], [], []
         for i, rec in enumerate(recordings, 1):
             notify(f"Запись {i} из {len(recordings)}")
             paths = [p.clip.path for p in rec.parts]
-            stops = 0.0
-            if settings.auto_brightness:
-                samples = brightness.sample_frames(paths, work / f"samples{i}.mkv")
-                stops = brightness.solve(samples, settings.lut, settings.profile, settings.target_luma)
-                samples.unlink(missing_ok=True)
+            if day_stops is not None:
+                stops = day_stops
+            elif settings.auto_brightness:
+                stops = _solve_brightness(paths, rec.duration, settings, work / f"samples{i}.mkv")
+            else:
+                stops = 0.0
             stops_used.append(stops)
             seg = video.encode_recording(
                 paths, work / f"rec{i}.mp4", target, encoder, settings.lut,
@@ -167,10 +175,21 @@ def build_day(
         title=title(kind, day, part),
         description=description(recordings[0].start, recordings[-1].end),
         recorded_at=recordings[0].start,
+        recorded_end=recordings[-1].end,
         duration=probe(out).duration,
         encoder=encoder,
         brightness_stops=stops_used,
     )
+
+
+def _solve_brightness(paths: list[Path], seconds: float, settings: Settings, samples_file: Path) -> float:
+    # Не больше ~600 кадров на замер: раз в 2 с, для длинного дня — реже.
+    every = max(2.0, seconds / 600)
+    samples = brightness.sample_frames(paths, samples_file, every)
+    try:
+        return brightness.solve(samples, settings.lut, settings.profile, settings.target_luma)
+    finally:
+        samples.unlink(missing_ok=True)
 
 
 def _start(p: Path) -> datetime | None:
@@ -179,8 +198,13 @@ def _start(p: Path) -> datetime | None:
     return parse_start(p.name)
 
 
-def build_pending(day: date, kind: str, state: State, settings: Settings, notify: Notify = print) -> BuildResult | None:
-    """Собирает ролик из ещё не использованных клипов дня (вторая заливка за день → «часть 2»)."""
+def build_pending(day: date, state: State, settings: Settings, kind: str | None = None,
+                  notify: Notify = print) -> int | None:
+    """Собирает ролик из ещё не использованных клипов дня (досъёмка → «часть 2»).
+
+    Тип (тренировка / занятие) можно выбрать позже: он нужен только для названия при загрузке.
+    Возвращает id ролика в журнале.
+    """
     names = state.unassigned_clips(day)
     if not names:
         return None
@@ -188,9 +212,34 @@ def build_pending(day: date, kind: str, state: State, settings: Settings, notify
     folder = settings.archive / day.isoformat()
     out = folder / ("video.mp4" if part == 1 else f"video_part{part}.mp4")
     try:
-        result = build_day(day, [folder / n for n in names], kind, part, settings, out, notify)
+        result = build_day(day, [folder / n for n in names], kind or "training", part, settings, out, notify)
     except Exception:
         state.update_video(video_id, status="failed")
         raise
-    state.update_video(video_id, status="built", file=str(out))
-    return result
+    state.update_video(video_id, status="built", file=str(out),
+                       rec_start=result.recorded_at.isoformat(), rec_end=result.recorded_end.isoformat())
+    return video_id
+
+
+def video_metadata(row) -> tuple[str, str, datetime]:
+    """Название, описание и время начала съёмки для ролика из журнала."""
+    start, end = datetime.fromisoformat(row["rec_start"]), datetime.fromisoformat(row["rec_end"])
+    return title(row["kind"], date.fromisoformat(row["day"]), row["part"]), description(start, end), start
+
+
+def upload_ready(state: State, settings: Settings, uploader: Callable[..., "object"], notify: Notify = print) -> list[int]:
+    """Загружает собранные ролики с выбранным типом. uploader — youtube.upload с готовым входом."""
+    done = []
+    for row in state.videos("built"):
+        if not row["kind"]:
+            continue  # ждёт выбора «Тренировка / Занятие»
+        name, desc, start = video_metadata(row)
+        notify(f"Загружаю «{name}»")
+        result = uploader(Path(row["file"]), name, desc, start)
+        state.update_video(row["id"], status="uploaded", youtube_id=result.video_id, privacy=result.privacy)
+        if result.privacy != "unlisted":
+            notify(f"«{name}» загружено как {result.privacy}: YouTube ограничил доступ до аудита API — {result.url}")
+        else:
+            notify(f"«{name}» загружено: {result.url}")
+        done.append(row["id"])
+    return done

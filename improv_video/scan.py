@@ -27,7 +27,10 @@ def find_camera_dirs(volume: Path) -> list[Path]:
 
 
 def list_clips(folder: Path) -> list[Clip]:
-    """Только VID_*.mp4 с датой в имени; .lrv, фото и прочее пропускаются."""
+    """Только VID_*.mp4 с датой в имени; .lrv, .bin, фото и прочее пропускаются.
+
+    Копии Finder («VID_… 2.mp4») с тем же временем и размером, что у оригинала, отбрасываются.
+    """
     clips = []
     for p in Path(folder).iterdir():
         if not p.is_file() or p.suffix.lower() != ".mp4" or p.name.startswith("."):
@@ -36,5 +39,10 @@ def list_clips(folder: Path) -> list[Clip]:
         if start is None:
             continue
         clips.append(Clip(path=p, name=p.name, size=p.stat().st_size, start=start))
-    clips.sort(key=lambda c: (c.start, c.name))
-    return clips
+    # Из одинаковых по времени и размеру оставляем файл с самым коротким именем (оригинал).
+    best: dict[tuple, Clip] = {}
+    for c in clips:
+        key = (c.start, c.size)
+        if key not in best or (len(c.name), c.name) < (len(best[key].name), best[key].name):
+            best[key] = c
+    return sorted(best.values(), key=lambda c: (c.start, c.name))

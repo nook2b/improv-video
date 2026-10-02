@@ -16,15 +16,22 @@ Insta360 Ace Pro 2 → YouTube: вставил карту — на YouTube по�
 - звук: каждый клип точно по длине видео, шумодав (afftdn / RNNoise / DeepFilterNet), loudnorm −14 LUFS;
 - HEVC Main10 с выбором кодировщика по железу, склейка без перекодирования.
 
-Ещё нет: загрузка на YouTube, интерфейс, сборка приложений.
+- загрузка на YouTube «по ссылке» с повторами, вход через браузер, токен в Keychain;
+- куски записи Ace Pro 2 (одно время в имени, разные номера), копии Finder «… 2.mp4» отбрасываются;
+- автояркость одной поправкой на день (ровный свет в помещении).
+
+Ещё нет: интерфейс в менюбаре, сборка приложения.
 
 ## Запуск из командной строки
 
 Нужны Python 3.11+ и ffmpeg в PATH.
 
 ```
-python -m improv_video --archive ~/Footage --lut ilog.cube import /Volumes/CARD --kind training
-python -m improv_video --archive ~/Footage build ~/Footage/2026-10-01 --kind lesson
+pip install -r requirements.txt
+python -m improv_video login --client-secrets ~/Downloads/client_secret.json
+python -m improv_video --lut ilog.cube import /Volumes/CARD --kind training --upload
+python -m improv_video status
+python -m improv_video --lut ilog.cube build ~/Footage/2026-10-01 --kind lesson
 ```
 
 ## Тесты

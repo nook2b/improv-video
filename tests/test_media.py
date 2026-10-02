@@ -5,7 +5,9 @@ from datetime import date
 import pytest
 
 from improv_video import audio, brightness
-from improv_video.pipeline import Settings, build_pending, import_card, mark_existing_as_done, new_clips_on_card
+from improv_video.pipeline import (Settings, build_pending, import_card, mark_existing_as_done,
+                                   new_clips_on_card, upload_ready, video_metadata)
+from improv_video.youtube import UploadResult
 from improv_video.probe import probe
 from improv_video.state import State
 from improv_video.video import Target, choose_target, bitrate_for
@@ -21,7 +23,7 @@ def streams(path):
 
 
 def test_clip_audio_matches_video_length(card, tmp_path):
-    clip = card / "DCIM" / "Camera01" / "VID_20261001_180500_00_001.mp4"
+    clip = card / "DCIM" / "Camera01" / "VID_20261001_180500_00_578.mp4"
     m = probe(clip)
     wav = audio.clip_audio(clip, m.duration, m.has_audio, tmp_path / "a.wav")
     assert int(streams(wav)[0]["duration_ts"]) == audio.samples(m.duration)
@@ -57,12 +59,16 @@ def test_full_day(card, settings, identity_lut):
     assert list(days) == [date(2026, 10, 1), date(2026, 10, 3)]
     assert new_clips_on_card(card, state) == []  # повторная вставка карты — ничего нового
 
-    r = build_pending(date(2026, 10, 1), "lesson", state, settings, notify=lambda _: None)
-    assert r.title == "Занятие 01.10.2026"
-    assert r.description == "Снято 01.10.2026 18:05 – 02.10.2026 01:30"
-    assert r.recorded_at.hour == 18
+    vid = build_pending(date(2026, 10, 1), state, settings, notify=lambda _: None)  # тип ещё не выбран
+    row = state.video(vid)
+    assert row["status"] == "built" and row["kind"] is None
+    state.update_video(vid, kind="lesson")
+    name, desc, start = video_metadata(state.video(vid))
+    assert name == "Занятие 01.10.2026"
+    assert desc == "Снято 01.10.2026 18:05 – 02.10.2026 01:30"
+    assert start.hour == 18
 
-    v, a = sorted(streams(r.file), key=lambda s: s["codec_type"], reverse=True)
+    v, a = sorted(streams(row["file"]), key=lambda s: s["codec_type"], reverse=True)
     assert v["codec_name"] == "hevc" and v["pix_fmt"] == "yuv420p10le"
     assert (v["width"], v["height"]) == (640, 360)
     assert v["color_primaries"] == "bt709" and v["color_transfer"] == "bt709" and v["color_space"] == "bt709"
@@ -71,9 +77,18 @@ def test_full_day(card, settings, identity_lut):
     assert abs(float(v["duration"]) - 10) < 0.1
     assert abs(float(a["duration"]) - float(v["duration"])) < 0.05
 
-    assert build_pending(date(2026, 10, 1), "lesson", state, settings) is None  # всё уже собрано
-    vertical = build_pending(date(2026, 10, 3), "training", state, settings, notify=lambda _: None)
-    assert vertical.title == "Тренировка 03.10.2026"
+    assert build_pending(date(2026, 10, 1), state, settings) is None  # всё уже собрано
+    vertical = build_pending(date(2026, 10, 3), state, settings, "training", notify=lambda _: None)
+
+    uploaded = []
+
+    def fake_upload(file, title, description, recorded_at):
+        uploaded.append(title)
+        return UploadResult("abc123", "private" if title.startswith("Тренировка") else "unlisted")
+
+    assert upload_ready(state, settings, fake_upload, notify=lambda _: None) == [vid, vertical]
+    assert uploaded == ["Занятие 01.10.2026", "Тренировка 03.10.2026"]
+    assert state.video(vertical)["privacy"] == "private"
 
 
 def test_first_run_skip(card, settings):

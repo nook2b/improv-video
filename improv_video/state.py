@@ -22,7 +22,10 @@ CREATE TABLE IF NOT EXISTS videos (
     kind       TEXT,               -- training | lesson; NULL, пока не выбран
     status     TEXT NOT NULL,      -- pending | built | uploaded | failed
     file       TEXT,
+    rec_start  TEXT,               -- начало и конец съёмки (местное время камеры, ISO)
+    rec_end    TEXT,
     youtube_id TEXT,
+    privacy    TEXT,               -- что ответил YouTube: unlisted | private | public
     UNIQUE (day, part)
 );
 """
@@ -77,7 +80,7 @@ class State:
         return video_id, part
 
     def update_video(self, video_id: int, **fields) -> None:
-        allowed = {"kind", "status", "file", "youtube_id"}
+        allowed = {"kind", "status", "file", "rec_start", "rec_end", "youtube_id", "privacy"}
         if not fields or set(fields) - allowed:
             raise ValueError(f"Недопустимые поля: {set(fields) - allowed}")
         cols = ", ".join(f"{k} = ?" for k in fields)
