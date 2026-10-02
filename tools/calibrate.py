@@ -41,6 +41,7 @@ def still(clip: Path, t: float, vf: str, out: Path) -> None:
 
 
 def main(clip: Path, lut: Path, out: Path) -> None:
+    clip, lut, out = clip.resolve(), lut.resolve(), out.resolve()
     out.mkdir(parents=True, exist_ok=True)
     section("Метаданные")
     info = json.loads(run("ffprobe", ["-v", "error", "-print_format", "json", "-show_format", "-show_streams", str(clip)]).stdout)
@@ -88,11 +89,13 @@ def main(clip: Path, lut: Path, out: Path) -> None:
     adj = brightness.adjust_filter("ilog", stops)
     cwd_lut = out / lut_name
     shutil.copyfile(lut, cwd_lut)
-    for name, vf in (("1_raw", "format=yuv420p"), ("2_lut", f"{norm},{lut_part}"),
-                     ("3_lut_auto", f"{norm},{adj},{lut_part}" if adj else f"{norm},{lut_part}")):
+    variants = [("1_raw", "format=yuv420p"), ("2_lut_0", f"{norm},{lut_part}")]
+    for st in (0.5, 1.0, 1.5, 2.0):
+        variants.append((f"3_lut_+{st:g}", f"{norm},{brightness.adjust_filter('ilog', st)},{lut_part}"))
+    for name, vf in variants:
         run("ffmpeg", ["-y", "-ss", f"{mid:.2f}", "-i", str(clip), "-vf", vf + ",scale=1280:-2:out_color_matrix=bt709",
                        "-frames:v", "1", f"{name}.png"], cwd=out)
-    print("кадры: 1_raw.png, 2_lut.png, 3_lut_auto.png")
+    print("кадры:", ", ".join(n + ".png" for n, _ in variants))
 
     section("Превью полного конвейера (первые 60 с)")
     vid = work / "VID_20261001_180000_00_001.mp4"
