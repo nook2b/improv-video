@@ -36,6 +36,7 @@ class MenuBarApp(rumps.App):
         for key, label in MODES.items():
             self.mode_menu.add(rumps.MenuItem(label, callback=self._set_mode(key)))
         self.login_item = rumps.MenuItem("Запускать при входе в систему", callback=self.toggle_login_item)
+        self.auto_item = rumps.MenuItem("Автоцвет (как «Авто» в Lumetri)", callback=self.toggle_auto)
         self.menu = [
             self.status_item,
             None,
@@ -49,6 +50,7 @@ class MenuBarApp(rumps.App):
             self.mode_menu,
             None,
             rumps.MenuItem("Выбрать LUT…", callback=self.choose_lut),
+            self.auto_item,
             self.denoise_menu,
             rumps.MenuItem("Папка архива…", callback=self.choose_archive),
             self.login_item,
@@ -82,6 +84,7 @@ class MenuBarApp(rumps.App):
         for key, label in MODES.items():
             self.mode_menu[label].state = int(self.config.upload_mode == key)
         self.login_item.state = int(macos.launch_at_login_enabled())
+        self.auto_item.state = int(self.config.auto_brightness)
 
     # ---------- действия ----------
 
@@ -100,6 +103,11 @@ class MenuBarApp(rumps.App):
             if key == "api":
                 self.controller.submit("deliver")
         return cb
+
+    def toggle_auto(self, _):
+        self.config.auto_brightness = not self.config.auto_brightness
+        self.config.save()
+        self._refresh_checks()
 
     def toggle_login_item(self, _):
         macos.set_launch_at_login(not macos.launch_at_login_enabled())
