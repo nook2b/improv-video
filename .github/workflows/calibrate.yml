@@ -1,0 +1,32 @@
+name: calibrate
+
+on:
+  workflow_dispatch:
+    inputs:
+      drive_id:
+        description: "ID файла на Google Drive (доступ по ссылке)"
+        required: true
+
+jobs:
+  calibrate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: sudo apt-get update && sudo apt-get install -y ffmpeg
+      - run: pip install -r requirements.txt
+      - name: Скачать клип с Google Drive
+        run: |
+          curl -sSL -o clip.mp4 "https://drive.usercontent.google.com/download?id=${{ inputs.drive_id }}&export=download&confirm=t"
+          ls -la clip.mp4
+          file clip.mp4
+      - name: Калибровка
+        run: python tools/calibrate.py clip.mp4 calibration/AcePro2_I-Log_To_Rec.709_V1.0.cube out
+      - uses: actions/upload-artifact@v4
+        with:
+          name: calibration
+          path: |
+            out/*.png
+            out/preview.mp4
