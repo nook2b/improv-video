@@ -97,11 +97,12 @@ def main(clip: Path, lut: Path, out: Path) -> None:
                        "-frames:v", "1", f"{name}.png"], cwd=out)
     print("кадры:", ", ".join(n + ".png" for n, _ in variants))
 
-    section("Превью полного конвейера (первые 60 с)")
+    section("Превью полного конвейера (первые 20 с, 1080p)")
     vid = work / "VID_20261001_180000_00_001.mp4"
-    ffmpeg(["-i", str(clip), "-t", "60", "-c", "copy", str(vid)])
+    ffmpeg(["-i", str(clip), "-t", "20", "-c", "copy", str(vid)])
     settings = Settings(archive=work, lut=lut, profile="ilog", denoise="medium",
-                        rnnoise_model=resources_dir() / "rnnoise" / "bd.rnnn", x265_preset="veryfast")
+                        rnnoise_model=resources_dir() / "rnnoise" / "bd.rnnn", x265_preset="ultrafast",
+                        max_height=1080)
     t0 = time.monotonic()
     r = build_day(date(2026, 10, 1), [vid], "training", 1, settings, out / "preview.mp4", notify=print)
     pm = probe(r.file)
