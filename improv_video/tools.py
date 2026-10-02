@@ -19,10 +19,21 @@ class ToolError(RuntimeError):
         super().__init__(f"{Path(cmd[0]).name} завершился с ошибкой:\n" + "\n".join(tail))
 
 
-def _bundled_dir() -> Path:
-    # В собранном приложении (PyInstaller) утилиты лежат рядом с кодом в папке bin.
-    base = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent.parent))
-    return base / "bin"
+def _base_dir() -> Path:
+    # В собранном приложении (PyInstaller) — папка с данными приложения, иначе корень репозитория.
+    return Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent.parent))
+
+
+def resources_dir() -> Path:
+    return _base_dir() / "resources"
+
+
+def _bundled_dirs() -> list[Path]:
+    dirs = [_base_dir() / "bin"]
+    if getattr(sys, "frozen", False):
+        # improv-video.app/Contents/MacOS/improv-video → Contents/Resources/bin
+        dirs.append(Path(sys.executable).resolve().parent.parent / "Resources" / "bin")
+    return dirs
 
 
 def find_tool(name: str) -> str:
@@ -31,9 +42,9 @@ def find_tool(name: str) -> str:
     if env:
         return env
     exe = name + (".exe" if sys.platform == "win32" else "")
-    bundled = _bundled_dir() / exe
-    if bundled.exists():
-        return str(bundled)
+    for d in _bundled_dirs():
+        if (d / exe).exists():
+            return str(d / exe)
     found = shutil.which(name)
     if found:
         return found

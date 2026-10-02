@@ -1,0 +1,84 @@
+name: build-mac
+
+on:
+  push:
+    branches: [main, "claude/**"]
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: sudo apt-get update && sudo apt-get install -y ffmpeg
+      - run: pip install -r requirements.txt pytest
+      - run: python -m pytest -q
+
+  mac:
+    needs: test
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: ffmpeg с библиотеками
+        run: |
+          brew install ffmpeg dylibbundler
+          mkdir -p build/bin/libs
+          cp "$(brew --prefix)/bin/ffmpeg" "$(brew --prefix)/bin/ffprobe" build/bin/
+          chmod u+w build/bin/*
+          dylibbundler -od -b -cd \
+            -x build/bin/ffmpeg -x build/bin/ffprobe \
+            -d build/bin/libs/ -p @executable_path/libs/ \
+            -s "$(brew --prefix)/lib"
+          build/bin/ffmpeg -hide_banner -encoders | grep -E "hevc_videotoolbox|libx265"
+          build/bin/ffmpeg -hide_banner -filters | grep -E "arnndn|loudnorm|lut3d"
+
+      - name: DeepFilterNet (сильное шумоподавление)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh release download -R Rikorose/DeepFilterNet --pattern "deep-filter-*-aarch64-apple-darwin" -O build/bin/deep-filter; then
+            chmod +x build/bin/deep-filter
+          else
+            echo "::warning::deep-filter не скачан — сильное шумоподавление будет недоступно"
+          fi
+
+      - name: Сборка приложения
+        run: |
+          pip install -r requirements.txt rumps pyinstaller
+          cd packaging && pyinstaller --noconfirm --distpath ../dist --workpath ../build/pyi improv-video.spec
+
+      - name: Утилиты в приложение и ad-hoc подпись
+        run: |
+          APP=dist/improv-video.app
+          cp -R build/bin "$APP/Contents/Resources/bin"
+          find "$APP/Contents/Resources/bin" -type f -exec codesign --force --sign - {} \;
+          codesign --force --deep --sign - "$APP"
+          codesign --verify --deep --strict --verbose=2 "$APP"
+
+      - name: Самопроверка собранного приложения
+        run: dist/improv-video.app/Contents/MacOS/improv-video --selftest
+
+      - name: Архив
+        run: ditto -c -k --keepParent dist/improv-video.app improv-video-mac.zip
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: improv-video-mac
+          path: improv-video-mac.zip
+
+      - name: Релиз (для тегов v*)
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "${GITHUB_REF_NAME}" improv-video-mac.zip --title "improv-video ${GITHUB_REF_NAME}" --notes "Сборка для Mac (Apple Silicon)."

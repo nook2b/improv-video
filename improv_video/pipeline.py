@@ -63,9 +63,14 @@ def estimate_needed_bytes(clips: list[Clip], durations: list[float], max_height:
     return int(sum(c.size for c in clips) + 2 * final + wav + RESERVE_BYTES)
 
 
+def source_folders(path: Path) -> list[Path]:
+    """Папки с клипами: DCIM/Camera* на карте или сама папка, если клипы лежат прямо в ней."""
+    return find_camera_dirs(path) or ([path] if list_clips(path) else [])
+
+
 def new_clips_on_card(volume: Path, state: State) -> list[Clip]:
     clips = []
-    for folder in find_camera_dirs(volume):
+    for folder in source_folders(volume):
         clips += [c for c in list_clips(folder) if not state.is_known(c.name, c.size)]
     return clips
 
@@ -107,7 +112,9 @@ def import_card(volume: Path, state: State, settings: Settings, notify: Notify =
         folder.mkdir(exist_ok=True)
         for rec in recordings:
             for part in rec.parts:
-                _copy_verified(part.clip.path, folder / part.clip.name)
+                target = folder / part.clip.name
+                if part.clip.path.resolve() != target.resolve():
+                    _copy_verified(part.clip.path, target)
                 state.add_clip(part.clip.name, part.clip.size, day)
                 result.setdefault(day, []).append(part.clip.name)
     notify("Можно извлечь флешку")
