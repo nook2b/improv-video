@@ -18,6 +18,8 @@ from improv_video import brightness  # noqa: E402
 from improv_video.pipeline import Settings, build_day  # noqa: E402
 from improv_video.probe import probe  # noqa: E402
 from improv_video.tools import ffmpeg, resources_dir, run  # noqa: E402
+from improv_video.video import normalize_filter  # noqa: E402
+import time  # noqa: E402
 
 
 def section(title):
@@ -56,7 +58,9 @@ def main(clip: Path, lut: Path, out: Path) -> None:
     section("Яркость (кадр раз в 2 с, 480p)")
     work = out / "work"
     work.mkdir(exist_ok=True)
-    samples = brightness.sample_frames([clip], work / "samples.mkv", 2.0)
+    t0 = time.monotonic()
+    samples = brightness.sample_frames([clip], work / "samples.mkv", 2.0, m.color_range)
+    print(f"выборка кадров: {time.monotonic() - t0:.1f} с на {m.duration:.0f} с видео (диапазон {m.color_range})")
     raw = stats(samples, "format=yuv420p")
     print("без LUT (лог-картинка):", raw)
     lut_name = "lut.cube"
@@ -79,12 +83,13 @@ def main(clip: Path, lut: Path, out: Path) -> None:
 
     section("Кадры")
     mid = m.duration / 2
-    base = f"format=yuv420p10le,scale=in_color_matrix=bt709:in_range=tv,format=gbrp10le,lut3d=file={lut_name}:interp=tetrahedral"
+    norm = normalize_filter(m.color_range)
+    lut_part = f"scale=in_color_matrix=bt709:in_range=tv,format=gbrp10le,lut3d=file={lut_name}:interp=tetrahedral"
     adj = brightness.adjust_filter("ilog", stops)
     cwd_lut = out / lut_name
     shutil.copyfile(lut, cwd_lut)
-    for name, vf in (("1_raw", "format=yuv420p"), ("2_lut", base),
-                     ("3_lut_auto", ("format=yuv420p10le," + adj + "," + base[len('format=yuv420p10le,'):]) if adj else base)):
+    for name, vf in (("1_raw", "format=yuv420p"), ("2_lut", f"{norm},{lut_part}"),
+                     ("3_lut_auto", f"{norm},{adj},{lut_part}" if adj else f"{norm},{lut_part}")):
         run("ffmpeg", ["-y", "-ss", f"{mid:.2f}", "-i", str(clip), "-vf", vf + ",scale=1280:-2:out_color_matrix=bt709",
                        "-frames:v", "1", f"{name}.png"], cwd=out)
     print("кадры: 1_raw.png, 2_lut.png, 3_lut_auto.png")
@@ -94,9 +99,11 @@ def main(clip: Path, lut: Path, out: Path) -> None:
     ffmpeg(["-i", str(clip), "-t", "60", "-c", "copy", str(vid)])
     settings = Settings(archive=work, lut=lut, profile="ilog", denoise="medium",
                         rnnoise_model=resources_dir() / "rnnoise" / "bd.rnnn", x265_preset="veryfast")
+    t0 = time.monotonic()
     r = build_day(date(2026, 10, 1), [vid], "training", 1, settings, out / "preview.mp4", notify=print)
     pm = probe(r.file)
-    print(f"превью: {pm.width}x{pm.height} {float(pm.fps):.3f} к/с {pm.duration:.1f} с, поправка {r.brightness_stops}")
+    print(f"превью: {pm.width}x{pm.height} {float(pm.fps):.3f} к/с {pm.duration:.1f} с, поправка {r.brightness_stops}, "
+          f"сборка {time.monotonic() - t0:.0f} с ({r.encoder})")
 
 
 if __name__ == "__main__":

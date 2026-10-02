@@ -53,6 +53,7 @@ def denoise(src: Path, out: Path, level: str, rnnoise_model: Path | None = None)
         if not rnnoise_model or not Path(rnnoise_model).exists():
             raise FileNotFoundError("Для среднего шумоподавления нужен файл модели RNNoise (.rnnn)")
         # Модель копируется в рабочую папку, чтобы путь не требовал экранирования в фильтре.
+        src, out = Path(src).resolve(), Path(out).resolve()
         local = src.parent / "rnnoise.rnnn"
         shutil.copyfile(rnnoise_model, local)
         ffmpeg(["-i", str(src), "-af", "arnndn=m=rnnoise.rnnn", "-c:a", "pcm_s16le", str(out)], cwd=src.parent)

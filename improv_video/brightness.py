@@ -8,6 +8,7 @@ import shutil
 from pathlib import Path
 
 from .tools import concat_list, ffmpeg
+from .video import decode_args, normalize_filter
 
 # Сколько 10-битных кодов яркости (диапазон 64–940) приходится на один стоп I-Log.
 # Оценка по серой оси официального LUT Insta360 «I-Log → Rec.709» около 18% серого:
@@ -32,19 +33,36 @@ def adjust_filter(profile: str, stops: float) -> str | None:
     return f"lutyuv=y='clip(64+(val-64)*{gain:.4f},minval,maxval)'"
 
 
-def sample_frames(clips: list[Path], out: Path, every: float = 2.0) -> Path:
-    """Кадр раз в every секунд, 480p, 10 бит без потерь — быстрый материал для замеров."""
+def sample_frames(clips: list[Path], out: Path, every: float = 2.0, src_range: str = "tv") -> Path:
+    """Кадр раз в every секунд, 480p, 10 бит без потерь — быстрый материал для замеров.
+
+    Декодируются только опорные кадры (-skip_frame nokey): полный декод 4K HEVC медленнее реального времени.
+    """
     lst = concat_list(clips, out.with_suffix(".txt"))
-    ffmpeg([
-        "-f", "concat", "-safe", "0", "-i", str(lst), "-an",
-        "-vf", f"fps=1/{every},scale=-2:480:flags=bilinear,format=yuv420p10le",
-        "-c:v", "ffv1", str(out),
-    ])
+    vf = f"fps=1/{every},scale=-2:480:flags=bilinear,{normalize_filter(src_range)}"
+    for fast in (True, False):
+        skip = ["-skip_frame", "nokey"] if fast else []
+        ffmpeg([*decode_args(), *skip, "-f", "concat", "-safe", "0", "-i", str(lst), "-an",
+                "-vf", vf, "-c:v", "ffv1", str(out)])
+        if _frame_count(out) > 0:
+            break
     return out
+
+
+def _frame_count(path: Path) -> int:
+    from .tools import ToolError, run
+
+    try:
+        out = run("ffprobe", ["-v", "error", "-count_packets", "-select_streams", "v:0",
+                              "-show_entries", "stream=nb_read_packets", "-of", "csv=p=0", str(path)]).stdout
+        return int(out.strip() or 0)
+    except (ToolError, ValueError):
+        return 0
 
 
 def measure(samples: Path, lut: Path | None, profile: str, stops: float) -> float:
     """Средняя яркость кадров после поправки и LUT, 0..1 в диапазоне 16–235."""
+    samples = Path(samples).resolve()
     steps = ["format=yuv420p10le"]
     adj = adjust_filter(profile, stops)
     if adj:

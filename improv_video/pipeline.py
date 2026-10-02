@@ -139,13 +139,15 @@ def build_day(
     target = video.choose_target([p.media for r in recordings for p in r.parts], settings.max_height)
     out.parent.mkdir(parents=True, exist_ok=True)
 
+    out = Path(out).resolve()
     with tempfile.TemporaryDirectory(prefix="improv-", dir=out.parent) as tmp:
         work = Path(tmp)
         day_stops = None
         if settings.auto_brightness and settings.brightness_scope == "day":
             notify("Замер яркости")
             day_stops = _solve_brightness([p.clip.path for r in recordings for p in r.parts],
-                                          sum(r.duration for r in recordings), settings, work / "samples.mkv")
+                                          sum(r.duration for r in recordings), settings, work / "samples.mkv",
+                                          recordings[0].parts[0].media.color_range)
         segments, rec_wavs, stops_used = [], [], []
         for i, rec in enumerate(recordings, 1):
             notify(f"Запись {i} из {len(recordings)}")
@@ -153,13 +155,15 @@ def build_day(
             if day_stops is not None:
                 stops = day_stops
             elif settings.auto_brightness:
-                stops = _solve_brightness(paths, rec.duration, settings, work / f"samples{i}.mkv")
+                stops = _solve_brightness(paths, rec.duration, settings, work / f"samples{i}.mkv",
+                                          rec.parts[0].media.color_range)
             else:
                 stops = 0.0
             stops_used.append(stops)
             seg = video.encode_recording(
                 paths, work / f"rec{i}.mp4", target, encoder, settings.lut,
                 brightness.adjust_filter(settings.profile, stops), settings.x265_preset,
+                rec.parts[0].media.color_range,
             )
             segments.append(seg)
             # Звук записи: каждый кусок по длине своего видео, затем вся запись — по длине сегмента.
@@ -189,10 +193,11 @@ def build_day(
     )
 
 
-def _solve_brightness(paths: list[Path], seconds: float, settings: Settings, samples_file: Path) -> float:
+def _solve_brightness(paths: list[Path], seconds: float, settings: Settings, samples_file: Path,
+                      src_range: str = "tv") -> float:
     # Не больше ~600 кадров на замер: раз в 2 с, для длинного дня — реже.
     every = max(2.0, seconds / 600)
-    samples = brightness.sample_frames(paths, samples_file, every)
+    samples = brightness.sample_frames(paths, samples_file, every, src_range)
     try:
         return brightness.solve(samples, settings.lut, settings.profile, settings.target_luma)
     finally:

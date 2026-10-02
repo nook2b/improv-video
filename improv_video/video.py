@@ -22,6 +22,18 @@ ENCODERS = {
 DEFAULT_ENCODERS = ["hevc_nvenc", "libx265"]
 
 
+def decode_args() -> list[str]:
+    """Аппаратное декодирование 4K HEVC на Mac; в остальных системах — процессор."""
+    return ["-hwaccel", "videotoolbox"] if sys.platform == "darwin" else []
+
+
+def normalize_filter(src_range: str = "tv") -> str:
+    """Любой вход → 10 бит, ограниченный диапазон, BT.709. Ace Pro 2 пишет 8 бит полного диапазона."""
+    rng = "pc" if src_range == "pc" else "tv"
+    return (f"scale=in_range={rng}:out_range=tv:in_color_matrix=bt709:out_color_matrix=bt709,"
+            "format=yuv420p10le")
+
+
 @dataclass(frozen=True)
 class Target:
     width: int
@@ -88,9 +100,10 @@ def choose_target(medias: list[Media], max_height: int = 2160) -> Target:
     return Target(w, h, fps)
 
 
-def video_filter(target: Target, encoder: str, lut_name: str | None, adjust: str | None) -> str:
-    """Порядок: 10 бит → поправка яркости → LUT → масштаб с полями → FPS."""
-    steps = ["format=yuv420p10le"]
+def video_filter(target: Target, encoder: str, lut_name: str | None, adjust: str | None,
+                 src_range: str = "tv") -> str:
+    """Порядок: 10 бит, ограниченный диапазон → поправка яркости → LUT → масштаб с полями → FPS."""
+    steps = [normalize_filter(src_range)]
     if adjust:
         steps.append(adjust)
     if lut_name:
@@ -119,8 +132,10 @@ def encode_recording(
     lut: Path | None = None,
     adjust: str | None = None,
     x265_preset: str = "medium",
+    src_range: str = "tv",
 ) -> Path:
     """Кодирует одну запись (все её куски) без звука."""
+    out = Path(out).resolve()
     work = out.parent
     lut_name = None
     if lut:
@@ -130,8 +145,8 @@ def encode_recording(
     lst = concat_list(clips, out.with_suffix(".txt"))
     ffmpeg(
         [
-            "-f", "concat", "-safe", "0", "-i", str(lst), "-map", "0:v:0", "-an",
-            "-vf", video_filter(target, encoder, lut_name, adjust),
+            *decode_args(), "-f", "concat", "-safe", "0", "-i", str(lst), "-map", "0:v:0", "-an",
+            "-vf", video_filter(target, encoder, lut_name, adjust, src_range),
             *encoder_args(encoder, bitrate_for(target), x265_preset),
             str(out),
         ],

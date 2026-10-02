@@ -19,6 +19,7 @@ class Media:
     has_audio: bool
     pix_fmt: str = ""
     color_transfer: str = ""
+    color_range: str = "tv"  # tv — 16–235, pc — полный 0–255 (Ace Pro 2 пишет pc)
 
 
 def _rotation(stream: dict) -> int:
@@ -36,6 +37,13 @@ def _fps(stream: dict) -> Fraction:
         if den and int(den) and int(num):
             return Fraction(int(num), int(den))
     return Fraction(30)
+
+
+def _range(stream: dict) -> str:
+    rng = stream.get("color_range")
+    if rng in ("pc", "jpeg") or stream.get("pix_fmt", "").startswith("yuvj"):
+        return "pc"
+    return "tv"
 
 
 def probe(path: Path) -> Media:
@@ -60,4 +68,5 @@ def probe(path: Path) -> Media:
         has_audio=any(s.get("codec_type") == "audio" for s in streams),
         pix_fmt=video.get("pix_fmt", ""),
         color_transfer=video.get("color_transfer", ""),
+        color_range=_range(video),
     )

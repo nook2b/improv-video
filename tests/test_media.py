@@ -104,3 +104,21 @@ def test_ilog_offset_before_lut(tmp_path, identity_lut):
     up = brightness.measure(samples, identity_lut, "ilog", 0.5)
     down = brightness.measure(samples, identity_lut, "ilog", -0.5)
     assert down < base < up
+
+
+def test_full_range_input_matches_limited(tmp_path, identity_lut):
+    """Ace Pro 2 пишет 8 бит полного диапазона (yuvj420p): яркость должна совпасть с той же картинкой в 16–235."""
+    src = make_clip(tmp_path / "src.mp4", 2, audio_seconds=0)
+    full = tmp_path / "VID_20261001_100000_00_001.mp4"
+    limited = tmp_path / "VID_20261001_100000_00_002.mp4"
+    for path, rng in ((full, "pc"), (limited, "tv")):
+        subprocess.run(["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-i", str(src),
+                        "-vf", f"scale=out_range={rng}", "-color_range", rng, "-c:v", "libx265",
+                        "-preset", "ultrafast", "-pix_fmt", "yuvj420p" if rng == "pc" else "yuv420p",
+                        "-x265-params", "log-level=error", str(path)], check=True)
+    assert probe(full).color_range == "pc" and probe(limited).color_range == "tv"
+    values = []
+    for path in (full, limited):
+        s = brightness.sample_frames([path], tmp_path / f"{path.stem}.mkv", 1.0, probe(path).color_range)
+        values.append(brightness.measure(s, identity_lut, "ilog", 0))
+    assert abs(values[0] - values[1]) < 0.01, values
