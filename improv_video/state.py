@@ -15,6 +15,10 @@ CREATE TABLE IF NOT EXISTS clips (
     video  INTEGER REFERENCES videos(id),
     PRIMARY KEY (name, size)
 );
+CREATE TABLE IF NOT EXISTS days (
+    day  TEXT PRIMARY KEY,
+    kind TEXT                      -- training | lesson: ответ на «Что снимали?» хранится за днём
+);
 CREATE TABLE IF NOT EXISTS videos (
     id         INTEGER PRIMARY KEY AUTOINCREMENT,
     day        TEXT NOT NULL,
@@ -60,6 +64,17 @@ class State:
         with self.db:
             return self.db.execute("DELETE FROM clips WHERE status = 'skipped'").rowcount
 
+    def release_video(self, video_id: int) -> None:
+        """Несобранный ролик (сбой, флешку вынули): клипы снова свободны, при следующей вставке соберутся."""
+        with self.db:
+            self.db.execute("UPDATE clips SET video = NULL WHERE video = ?", (video_id,))
+            self.db.execute("DELETE FROM videos WHERE id = ?", (video_id,))
+
+    def days_with_unassigned(self) -> list[date]:
+        rows = self.db.execute(
+            "SELECT DISTINCT day FROM clips WHERE status = 'copied' AND video IS NULL ORDER BY day")
+        return [date.fromisoformat(r["day"]) for r in rows]
+
     def unassigned_clips(self, day: date) -> list[str]:
         rows = self.db.execute(
             "SELECT name FROM clips WHERE day = ? AND status = 'copied' AND video IS NULL ORDER BY name",
@@ -67,8 +82,20 @@ class State:
         )
         return [r["name"] for r in rows]
 
+    def set_day_kind(self, day: date, kind: str) -> None:
+        with self.db:
+            self.db.execute("INSERT INTO days (day, kind) VALUES (?, ?) ON CONFLICT(day) DO UPDATE SET kind = ?",
+                            (day.isoformat(), kind, kind))
+            self.db.execute("UPDATE videos SET kind = ? WHERE day = ? AND status IN ('pending', 'built')",
+                            (kind, day.isoformat()))
+
+    def day_kind(self, day: date) -> str | None:
+        row = self.db.execute("SELECT kind FROM days WHERE day = ?", (day.isoformat(),)).fetchone()
+        return row["kind"] if row else None
+
     def create_video(self, day: date, clip_names: list[str], kind: str | None = None) -> tuple[int, int]:
         """Новый ролик за день с номером части; возвращает (id, part)."""
+        kind = kind or self.day_kind(day)
         with self.db:
             part = self.db.execute(
                 "SELECT COALESCE(MAX(part), 0) + 1 FROM videos WHERE day = ?", (day.isoformat(),)

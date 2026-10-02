@@ -13,6 +13,7 @@ from .config import LOG_FILE, AppConfig
 from .controller import Controller
 
 DENOISE = {"off": "Выключено", "weak": "Слабое", "medium": "Среднее (голос)", "strong": "Сильное (DeepFilterNet)"}
+QUALITY = {1080: "1080p (меньше места, быстрее)", 2160: "4K"}
 MODES = {"manual": "Вручную через YouTube Studio (до аудита)", "api": "Автоматически «по ссылке» (после аудита)"}
 
 
@@ -37,6 +38,10 @@ class MenuBarApp(rumps.App):
             self.mode_menu.add(rumps.MenuItem(label, callback=self._set_mode(key)))
         self.login_item = rumps.MenuItem("Запускать при входе в систему", callback=self.toggle_login_item)
         self.auto_item = rumps.MenuItem("Автоцвет (как «Авто» в Lumetri)", callback=self.toggle_auto)
+        self.copy_item = rumps.MenuItem("Копировать клипы на Mac", callback=self.toggle_copy)
+        self.quality_menu = rumps.MenuItem("Качество видео")
+        for h, label in QUALITY.items():
+            self.quality_menu.add(rumps.MenuItem(label, callback=self._set_quality(h)))
         self.menu = [
             self.status_item,
             None,
@@ -51,6 +56,8 @@ class MenuBarApp(rumps.App):
             None,
             rumps.MenuItem("Выбрать LUT…", callback=self.choose_lut),
             self.auto_item,
+            self.quality_menu,
+            self.copy_item,
             self.denoise_menu,
             rumps.MenuItem("Папка архива…", callback=self.choose_archive),
             self.login_item,
@@ -85,6 +92,9 @@ class MenuBarApp(rumps.App):
             self.mode_menu[label].state = int(self.config.upload_mode == key)
         self.login_item.state = int(macos.launch_at_login_enabled())
         self.auto_item.state = int(self.config.auto_brightness)
+        self.copy_item.state = int(self.config.copy_clips)
+        for h, label in QUALITY.items():
+            self.quality_menu[label].state = int(self.config.max_height == h)
 
     # ---------- действия ----------
 
@@ -102,6 +112,18 @@ class MenuBarApp(rumps.App):
             self._refresh_checks()
             if key == "api":
                 self.controller.submit("deliver")
+        return cb
+
+    def toggle_copy(self, _):
+        self.config.copy_clips = not self.config.copy_clips
+        self.config.save()
+        self._refresh_checks()
+
+    def _set_quality(self, h):
+        def cb(_):
+            self.config.max_height = h
+            self.config.save()
+            self._refresh_checks()
         return cb
 
     def toggle_auto(self, _):

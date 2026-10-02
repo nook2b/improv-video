@@ -38,6 +38,7 @@ class Settings:
     day_start: time = DEFAULT_DAY_START
     x265_preset: str = "medium"
     encoders: tuple[str, ...] | None = None
+    copy_clips: bool = True  # False — клипы читаются прямо с флешки, на Mac пишется только готовое видео
     workers: int = 0  # параллельных процессов кодирования; 0 — по числу ядер (до 4)
     chunk_seconds: float = 300  # длинные записи делятся на куски для параллельного кодирования
 
@@ -63,12 +64,20 @@ class NotEnoughSpace(RuntimeError):
     pass
 
 
-def estimate_needed_bytes(clips: list[Clip], durations: list[float], max_height: int = 2160) -> int:
-    """Клипы + 2 × итоговое видео (записи и склейка живут одновременно) + WAV дня + запас."""
+def estimate_needed_bytes(clips: list[Clip], durations: list[float], max_height: int = 2160,
+                          copy_clips: bool = True) -> int:
+    """(Клипы, если копируются) + 2 × итоговое видео (куски и склейка живут одновременно) + WAV дня + запас."""
     seconds = sum(durations)
-    final = seconds * (60_000_000 if max_height >= 2160 else 16_000_000) / 8
+    if max_height >= 2160:
+        bps = 60_000_000
+    elif max_height >= 1440:
+        bps = 24_000_000
+    else:
+        bps = 12_000_000
+    final = seconds * bps / 8
     wav = seconds * audio.RATE * 2 * 2
-    return int(sum(c.size for c in clips) + 2 * final + wav + RESERVE_BYTES)
+    clips_bytes = sum(c.size for c in clips) if copy_clips else 0
+    return int(clips_bytes + 2 * final + wav + RESERVE_BYTES)
 
 
 def source_folders(path: Path) -> list[Path]:
@@ -101,19 +110,24 @@ def _copy_verified(src: Path, dst: Path) -> None:
 
 
 def import_card(volume: Path, state: State, settings: Settings, notify: Notify = print) -> dict[date, list[str]]:
-    """Копирует новые клипы в архив/ГГГГ-ММ-ДД/. Возвращает {день: [имена клипов]}."""
+    """Регистрирует новые клипы; при copy_clips копирует их в архив/ГГГГ-ММ-ДД/.
+
+    Возвращает {день: [имена клипов]}. Без копирования клипы читаются с флешки при сборке.
+    """
     clips = new_clips_on_card(volume, state)
     if not clips:
         return {}
     parts = [Part(c, probe(c.path)) for c in clips]
     settings.archive.mkdir(parents=True, exist_ok=True)
-    need = estimate_needed_bytes(clips, [p.media.duration for p in parts], settings.max_height)
+    need = estimate_needed_bytes(clips, [p.media.duration for p in parts], settings.max_height,
+                                 settings.copy_clips)
     free = shutil.disk_usage(settings.archive).free
     if free < need:
         raise NotEnoughSpace(f"Нет места на диске: нужно {need / GB:.0f} ГБ, свободно {free / GB:.0f} ГБ")
 
     days = group_days(group_recordings(parts), settings.day_start)
-    notify(f"Найдено {len(clips)} новых клипов за {len(days)} дн., копирую…")
+    notify(f"Найдено {len(clips)} новых клипов за {len(days)} дн."
+           + (", копирую…" if settings.copy_clips else ". Не вынимайте флешку до конца обработки"))
     result: dict[date, list[str]] = {}
     for day, recordings in days.items():
         folder = settings.archive / day.isoformat()
@@ -121,12 +135,20 @@ def import_card(volume: Path, state: State, settings: Settings, notify: Notify =
         for rec in recordings:
             for part in rec.parts:
                 target = folder / part.clip.name
-                if part.clip.path.resolve() != target.resolve():
+                if settings.copy_clips and part.clip.path.resolve() != target.resolve():
                     _copy_verified(part.clip.path, target)
                 state.add_clip(part.clip.name, part.clip.size, day)
                 result.setdefault(day, []).append(part.clip.name)
-    notify("Можно извлечь флешку")
+    if settings.copy_clips:
+        notify("Можно извлечь флешку")
     return result
+
+
+def clip_locations(source: Path | None) -> dict[str, Path]:
+    """Имя клипа → путь на флешке (или в папке), если она сейчас подключена."""
+    if source is None:
+        return {}
+    return {c.name: c.path for folder in source_folders(source) for c in list_clips(folder)}
 
 
 def build_day(
@@ -266,7 +288,7 @@ def _start(p: Path) -> datetime | None:
 
 
 def build_pending(day: date, state: State, settings: Settings, kind: str | None = None,
-                  notify: Notify = print) -> int | None:
+                  notify: Notify = print, source: Path | None = None) -> int | None:
     """Собирает ролик из ещё не использованных клипов дня (досъёмка → «часть 2»).
 
     Тип (тренировка / занятие) можно выбрать позже: он нужен только для названия при загрузке.
@@ -275,13 +297,18 @@ def build_pending(day: date, state: State, settings: Settings, kind: str | None 
     names = state.unassigned_clips(day)
     if not names:
         return None
-    video_id, part = state.create_video(day, names, kind)
     folder = settings.archive / day.isoformat()
+    on_card = clip_locations(source)
+    paths = [on_card.get(n, folder / n) for n in names]
+    if not all(p.exists() for p in paths):
+        return None  # клипы на флешке, а её нет — соберём при следующей вставке
+    video_id, part = state.create_video(day, names, kind)
+    folder.mkdir(parents=True, exist_ok=True)
     out = folder / ("video.mp4" if part == 1 else f"video_part{part}.mp4")
     try:
-        result = build_day(day, [folder / n for n in names], kind or "training", part, settings, out, notify)
+        result = build_day(day, paths, kind or "training", part, settings, out, notify)
     except Exception:
-        state.update_video(video_id, status="failed")
+        state.release_video(video_id)
         raise
     state.update_video(video_id, status="built", file=str(out),
                        rec_start=result.recorded_at.isoformat(), rec_end=result.recorded_end.isoformat())

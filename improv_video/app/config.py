@@ -20,6 +20,8 @@ class AppConfig:
     client_secrets: str = ""
     denoise: str = "medium"  # off | weak | medium | strong
     auto_brightness: bool = True
+    copy_clips: bool = False  # мало места на Mac: клипы читаются прямо с флешки
+    max_height: int = 1080  # 1080 или 2160
     # manual — до аудита API: файл готовится, загрузка в YouTube Studio руками;
     # api — после аудита: загрузка «по ссылке» сама.
     upload_mode: str = "manual"
@@ -50,4 +52,6 @@ class AppConfig:
             denoise=self.denoise,
             rnnoise_model=resources_dir() / "rnnoise" / "bd.rnnn",
             auto_brightness=self.auto_brightness,
+            copy_clips=self.copy_clips,
+            max_height=self.max_height,
         )

@@ -145,7 +145,7 @@ class Controller:
         """Флешка или папка с клипами."""
         settings = self.config.settings()
         clips = new_clips_on_card(path, self.state)
-        if not clips:
+        if not clips and not self.state.days_with_unassigned():
             return
         if self.state.is_empty():
             days = len({c.start.date() for c in clips})
@@ -167,8 +167,17 @@ class Controller:
             days = import_card(path, self.state, settings, self._progress)
             for day in days:
                 self._spawn(self._ask_kind, day)
-            for day in days:
-                build_pending(day, self.state, settings, None, self._progress)
+            # Новые дни и те, что раньше не собрались (флешку вынули, сбой)
+            for day in sorted(set(days) | set(self.state.days_with_unassigned())):
+                try:
+                    build_pending(day, self.state, settings, None, self._progress, source=path)
+                except NotEnoughSpace:
+                    raise
+                except Exception as e:  # noqa: BLE001 — один день не должен останавливать остальные
+                    log.exception("Не собрался день %s", day)
+                    self._say("Не удалось собрать", f"{day:%d.%m.%Y}: {str(e)[:150]}. Повторю при следующей вставке флешки.")
+            if not settings.copy_clips:
+                self._say("improv-video", "Можно извлечь флешку")
             self._do_deliver()
 
     def _ask_kind(self, day: date) -> None:
@@ -179,9 +188,7 @@ class Controller:
             self.submit("kind", day, KIND_BY_LABEL[answer])
 
     def _do_kind(self, day: date, kind: str) -> None:
-        for row in self.state.videos():
-            if row["day"] == day.isoformat() and row["status"] in ("pending", "built"):
-                self.state.update_video(row["id"], kind=kind)
+        self.state.set_day_kind(day, kind)
         self.config.last_kind = kind
         self._save_config()
         self._do_deliver()

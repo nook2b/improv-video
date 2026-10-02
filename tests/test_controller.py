@@ -93,3 +93,40 @@ def _fast_settings(original):
         s.encoders = ("libx265",)
         return s
     return settings
+
+
+def test_no_copy_mode_reads_from_card_and_resumes(card, tmp_path, monkeypatch):
+    """Без копирования: на Mac только готовое видео; без флешки день ждёт и собирается при новой вставке."""
+    import shutil
+    monkeypatch.setattr("improv_video.app.config.AppConfig.settings", _fast_settings(AppConfig.settings))
+    # Своя копия карты, чтобы её можно было «вынуть»
+    my_card = tmp_path / "CARD"
+    shutil.copytree(card, my_card)
+    ui = FakeUI({"первый запуск": "Обработать все", "Что снимали": "Занятие"})
+    c = make_controller(tmp_path, ui, copy_clips=False, max_height=1080)
+
+    # Сбой посреди сборки (как если флешку вынули): ролик не теряется
+    calls = {"n": 0}
+    import improv_video.pipeline as pl
+    real_build = pl.build_day
+
+    def flaky(*a, **kw):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise OSError("флешка извлечена")
+        return real_build(*a, **kw)
+
+    monkeypatch.setattr(pl, "build_day", flaky)
+    c.submit("source", my_card)
+    c.wait_idle(300)
+    archive = tmp_path / "Footage"
+    assert not list(archive.rglob("VID_*.mp4"))  # клипы на Mac не копируются
+    first = sorted(n for n, _, _ in c.manual)
+
+    c.submit("source", my_card)  # вставили флешку снова
+    c.wait_idle(300)
+    c.stop()
+    names = sorted(n for n, _, _ in c.manual)
+    assert names == ["Занятие 01.10.2026", "Занятие 03.10.2026"], (first, names)
+    assert not list(archive.rglob("VID_*.mp4"))
+    assert len(list(archive.rglob("video*.mp4"))) == 2
