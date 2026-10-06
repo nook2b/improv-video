@@ -5,7 +5,7 @@ from datetime import date
 import pytest
 
 from improv_video import audio, brightness
-from improv_video.pipeline import (Settings, build_pending, import_card, mark_existing_as_done,
+from improv_video.pipeline import (NotEnoughSpace, Settings, build_pending, import_card, mark_existing_as_done,
                                    new_clips_on_card, upload_ready, video_metadata)
 from improv_video.youtube import UploadResult
 from improv_video.probe import probe
@@ -95,6 +95,23 @@ def test_first_run_skip(card, settings):
     state = State(settings.archive / "state.sqlite")
     assert mark_existing_as_done(card, state, settings) == 5
     assert import_card(card, state, settings, notify=lambda _: None) == {}
+
+
+def test_space_checked_per_day_not_for_whole_card(card, settings, monkeypatch):
+    """Без копирования импорт не требует места; нехватка на сборку дня не теряет клипы."""
+    import shutil
+    from collections import namedtuple
+
+    settings.copy_clips = False
+    state = State(settings.archive / "state.sqlite")
+    days = import_card(card, state, settings, notify=lambda _: None)
+    assert days
+    Usage = namedtuple("Usage", "total used free")
+    monkeypatch.setattr(shutil, "disk_usage", lambda _: Usage(0, 0, 1))
+    day = sorted(days)[0]
+    with pytest.raises(NotEnoughSpace, match="Нет места для ролика"):
+        build_pending(day, state, settings, notify=lambda _: None, source=card)
+    assert state.unassigned_clips(day)  # день соберётся при следующей вставке
 
 
 def test_ilog_offset_before_lut(tmp_path, identity_lut):

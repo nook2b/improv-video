@@ -19,7 +19,7 @@ from .scan import Clip, find_camera_dirs, list_clips
 from .state import State
 
 GB = 1024**3
-RESERVE_BYTES = 10 * GB
+RESERVE_BYTES = 5 * GB  # macOS нужно немного свободного места для работы
 
 Notify = Callable[[str], None]
 
@@ -64,9 +64,8 @@ class NotEnoughSpace(RuntimeError):
     pass
 
 
-def estimate_needed_bytes(clips: list[Clip], durations: list[float], max_height: int = 2160,
-                          copy_clips: bool = True) -> int:
-    """(Клипы, если копируются) + 2 × итоговое видео (куски и склейка живут одновременно) + WAV дня + запас."""
+def estimate_build_bytes(durations: list[float], max_height: int = 2160) -> int:
+    """Место на сборку одного дня: готовое видео + сегменты записей (живут до склейки) + WAV + запас."""
     seconds = sum(durations)
     if max_height >= 2160:
         bps = 60_000_000
@@ -76,8 +75,15 @@ def estimate_needed_bytes(clips: list[Clip], durations: list[float], max_height:
         bps = 12_000_000
     final = seconds * bps / 8
     wav = seconds * audio.RATE * 2 * 2
-    clips_bytes = sum(c.size for c in clips) if copy_clips else 0
-    return int(clips_bytes + 2 * final + wav + RESERVE_BYTES)
+    # Куски записи удаляются после склейки записи; одновременно живут сегменты и итоговый файл.
+    # WAV: куски, склейка, подгонка, день, шумодав, громкость.
+    return int(2 * final + 6 * wav + RESERVE_BYTES)
+
+
+def _check_space(folder: Path, need: int, what: str) -> None:
+    free = shutil.disk_usage(folder).free
+    if free < need:
+        raise NotEnoughSpace(f"{what}: нужно {need / GB:.0f} ГБ, свободно {free / GB:.0f} ГБ")
 
 
 def source_folders(path: Path) -> list[Path]:
@@ -119,14 +125,15 @@ def import_card(volume: Path, state: State, settings: Settings, notify: Notify =
         return {}
     parts = [Part(c, probe(c.path)) for c in clips]
     settings.archive.mkdir(parents=True, exist_ok=True)
-    need = estimate_needed_bytes(clips, [p.media.duration for p in parts], settings.max_height,
-                                 settings.copy_clips)
-    free = shutil.disk_usage(settings.archive).free
-    if free < need:
-        raise NotEnoughSpace(f"Нет места на диске: нужно {need / GB:.0f} ГБ, свободно {free / GB:.0f} ГБ")
+    clips_bytes = sum(c.size for c in clips)
+    hours = sum(p.media.duration for p in parts) / 3600
+    if settings.copy_clips:
+        # Место на сборку проверяется отдельно перед каждым днём
+        _check_space(settings.archive, clips_bytes + RESERVE_BYTES,
+                     f"Нет места для копии {len(clips)} клипов ({clips_bytes / GB:.0f} ГБ)")
 
     days = group_days(group_recordings(parts), settings.day_start)
-    notify(f"Найдено {len(clips)} новых клипов за {len(days)} дн."
+    notify(f"Найдено {len(clips)} новых клипов ({clips_bytes / GB:.0f} ГБ, {hours:.1f} ч) за {len(days)} дн."
            + (", копирую…" if settings.copy_clips else ". Не вынимайте флешку до конца обработки"))
     result: dict[date, list[str]] = {}
     for day, recordings in days.items():
@@ -165,15 +172,17 @@ def build_day(
     if not clips:
         raise ValueError("Нет клипов для сборки")
     recordings = group_recordings([Part(c, probe(c.path)) for c in clips])
+    out.parent.mkdir(parents=True, exist_ok=True)
+    total = sum(r.duration for r in recordings)
+    _check_space(out.parent, estimate_build_bytes([total], settings.max_height),
+                 f"Нет места для ролика {day:%d.%m.%Y} ({total / 3600:.1f} ч видео)")
     encoder = video.pick_encoder(settings.encoders)
     target = video.choose_target([p.media for r in recordings for p in r.parts], settings.max_height)
-    out.parent.mkdir(parents=True, exist_ok=True)
 
     out = Path(out).resolve()
     with tempfile.TemporaryDirectory(prefix="improv-", dir=out.parent) as tmp:
         work = Path(tmp)
         all_paths = [p.clip.path for r in recordings for p in r.parts]
-        total = sum(r.duration for r in recordings)
         src_range = recordings[0].parts[0].media.color_range
         auto_lut, color_note = None, ""
         if settings.auto_brightness and settings.lut and settings.profile == "ilog":
