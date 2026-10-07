@@ -391,16 +391,27 @@ def ready_painter(info: ReadyInfo):
         if draw:
             draw_buttons_right(c, buttons, right, y, dark, True)
             used = sum(button_width(b) for b in buttons) + 8 + 8
-            label = info.file.name + (f" · {info.size}" if info.size else "")
             room = right - used - (x0 + 18)
             fnt = font(12)
-            while text_width(label, fnt) > room and len(label) > 1:
-                label = label[:-2] + "…"
+            label = _fit_middle(info.file.name, f" · {info.size}" if info.size else "", room, fnt)
             draw_icon("film", x0, y + 8, 12, secondary)
             draw_line(label, x0 + 18, y, 28, fnt, secondary)
         y += 28
         return y + 14
     return paint
+
+
+def _fit_middle(name: str, tail: str, room: float, fnt) -> str:
+    """Имя файла с многоточием посередине, хвост («· 4.2 ГБ») всегда виден."""
+    if text_width(name + tail, fnt) <= room:
+        return name + tail
+    head, end = name, ""
+    stem, dot, ext = name.rpartition(".")
+    if dot:
+        head, end = stem, "." + ext
+    while len(head) > 1 and text_width(head + "…" + end + tail, fnt) > room:
+        head = head[:-1]
+    return head.rstrip() + "…" + end + tail
 
 
 def build_ready(info: ReadyInfo, answer, actions):
