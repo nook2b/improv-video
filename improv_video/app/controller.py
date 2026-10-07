@@ -171,8 +171,8 @@ class Controller:
             for day in sorted(set(days) | set(self.state.days_with_unassigned())):
                 try:
                     build_pending(day, self.state, settings, None, self._progress, source=path)
-                except NotEnoughSpace:
-                    raise
+                except NotEnoughSpace as e:  # другие дни могут поместиться
+                    self._say("Нет места на диске", f"{e}. Освободите место и вставьте флешку заново.")
                 except Exception as e:  # noqa: BLE001 — один день не должен останавливать остальные
                     log.exception("Не собрался день %s", day)
                     self._say("Не удалось собрать", f"{day:%d.%m.%Y}: {str(e)[:150]}. Повторю при следующей вставке флешки.")

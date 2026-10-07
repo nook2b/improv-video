@@ -8,6 +8,7 @@ from pathlib import Path
 
 import rumps
 
+from .. import __version__
 from . import macos
 from .config import LOG_FILE, AppConfig
 from .controller import Controller
@@ -175,4 +176,8 @@ def main() -> None:
     LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
     logging.basicConfig(filename=LOG_FILE, level=logging.INFO,
                         format="%(asctime)s %(levelname)s %(message)s")
+    config = AppConfig.load()
+    logging.getLogger("improv-video").info(
+        "improv-video %s: архив %s, копировать клипы: %s, качество %sp",
+        __version__, config.archive, "да" if config.copy_clips else "нет", config.max_height)
     MenuBarApp().run()
