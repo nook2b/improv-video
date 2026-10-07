@@ -549,5 +549,21 @@ def render_demo(outdir: Path) -> list[Path]:
             path = outdir / f"{name}-{'dark' if dark else 'light'}.png"
             render_png(canvas, path, dark)
             written.append(path)
+    # Окна целиком (без показа): то же, что делают ask_kind / show_ready / ask_first_run
+    for build in (lambda ans: build_kind(KindInfo("06.10.2026", "18:05–20:40 · 1.5 ч · 12 клипов"), ans),
+                  lambda ans: build_ready(ReadyInfo("Тренировка 06.10.2026", "Снято 06.10.2026, 18:05–20:40",
+                                                    Path("video.mp4"), "4.2 ГБ"), ans,
+                                          {"copy": lambda t: None, "reveal": lambda p: None}),
+                  lambda ans: build_first_run(20, 3, ans)):
+        answers = []
+        win = build(answers.append)
+        canvas = win.contentView()
+        canvas.displayIfNeeded()
+        for key in [k for _, k in canvas.hits]:  # нажать каждую кнопку
+            canvas.on_click(key)
+        canvas.on_key("return")
+        canvas.on_key("escape")
+        win.close()
+        print(f"окно {canvas.frame().size.width:.0f}×{canvas.frame().size.height:.0f}: ответы {answers}")
     return written
 
