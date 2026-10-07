@@ -1,20 +1,45 @@
-"""Меню в строке меню macOS (rumps). Колбэки меню не блокируют интерфейс: работа уходит в очередь."""
+"""Меню в строке меню macOS по дизайну «Меню improv-video».
+
+Сверху — что происходит сейчас, посередине — ролики и частые действия, внизу — настройки в трёх
+подменю. Обычные пункты системные; блок статуса, строки «Ролики» и значок рисует views.py.
+Колбэки меню не блокируют интерфейс: работа уходит в очередь контроллера.
+"""
 
 from __future__ import annotations
 
 import logging
 import threading
+from pathlib import Path
 
 import rumps
+from AppKit import (
+    NSAlert,
+    NSAlertFirstButtonReturn,
+    NSApp,
+    NSAttributedString,
+    NSColor,
+    NSEventTrackingRunLoopMode,
+    NSFont,
+    NSFontAttributeName,
+    NSForegroundColorAttributeName,
+    NSImageLeft,
+    NSMenu,
+    NSMenuItem,
+    NSMutableAttributedString,
+    NSMutableParagraphStyle,
+    NSParagraphStyleAttributeName,
+    NSRunLoop,
+    NSTextAlignmentRight,
+    NSTextTab,
+)
 
 from .. import __version__
-from . import macos
+from . import macos, views
+from . import menu_model as mm
 from .config import LOG_FILE, AppConfig
 from .controller import Controller
 
-DENOISE = {"off": "Выключено", "weak": "Слабое", "medium": "Среднее (голос)", "strong": "Сильное (DeepFilterNet)"}
-QUALITY = {1080: "1080p (меньше места, быстрее)", 2160: "4K"}
-MODES = {"manual": "Вручную через YouTube Studio (до аудита)", "api": "Автоматически «по ссылке» (после аудита)"}
+TAB = 236  # где кончаются значения справа («1080p», «не вошли») перед стрелкой подменю
 
 
 def _in_thread(fn):
@@ -23,145 +48,339 @@ def _in_thread(fn):
     return run
 
 
+def _attributed(text: str, value: str = "", *, size: float = 0, dim: float = 0.5, color=None):
+    """Заголовок пункта с приглушённым значением справа («YouTube … вручную»)."""
+    fnt = NSFont.menuFontOfSize_(size)
+    para = NSMutableParagraphStyle.alloc().init()
+    para.setTabStops_([NSTextTab.alloc().initWithTextAlignment_location_options_(NSTextAlignmentRight, TAB, {})])
+    base = {NSFontAttributeName: fnt, NSParagraphStyleAttributeName: para}
+    if color is not None:
+        base[NSForegroundColorAttributeName] = color
+    out = NSMutableAttributedString.alloc().initWithString_attributes_(text, base)
+    if value:
+        attrs = dict(base)
+        attrs[NSForegroundColorAttributeName] = (color or NSColor.labelColor()).colorWithAlphaComponent_(dim)
+        out.appendAttributedString_(NSAttributedString.alloc().initWithString_attributes_("\t" + value, attrs))
+    return out
+
+
+def _set_title(item: rumps.MenuItem, text: str, value: str = "") -> None:
+    item._menuitem.setAttributedTitle_(_attributed(text, value))
+
+
+def _header(text: str):
+    """Заголовок группы в подменю («Качество видео»)."""
+    if hasattr(NSMenuItem, "sectionHeaderWithTitle_"):  # macOS 14+
+        return NSMenuItem.sectionHeaderWithTitle_(text)
+    item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(text, None, "")
+    item.setAttributedTitle_(NSAttributedString.alloc().initWithString_attributes_(
+        text, {NSFontAttributeName: NSFont.systemFontOfSize_weight_(11, 0.3),
+               NSForegroundColorAttributeName: NSColor.tertiaryLabelColor()}))
+    item.setEnabled_(False)
+    return item
+
+
+def _note(text: str):
+    """Пояснение мелким шрифтом без действия."""
+    item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(text, None, "")
+    item.setAttributedTitle_(NSAttributedString.alloc().initWithString_attributes_(
+        text, {NSFontAttributeName: NSFont.systemFontOfSize_(11),
+               NSForegroundColorAttributeName: NSColor.tertiaryLabelColor()}))
+    item.setEnabled_(False)
+    return item
+
+
+def _raw(parent: rumps.MenuItem, nsitem) -> None:
+    """Добавить в подменю системный пункт мимо rumps (заголовок, пояснение, своя вьюха)."""
+    if parent._menu is None:  # как делает сам rumps при первом add
+        parent._menu = NSMenu.alloc().init()
+        parent._menuitem.setSubmenu_(parent._menu)
+    parent._menu.addItem_(nsitem)
+
+
 class MenuBarApp(rumps.App):
-    def __init__(self):
-        super().__init__("improv-video", title="🎬", quit_button=None)
+    def __init__(self, start: bool = True):
+        super().__init__("improv-video", title=None, icon=str(views.ICONS / "menubar.png"), template=True,
+                         quit_button=None)
         self.config = AppConfig.load()
         self.controller = Controller(self.config, macos)
-        self.status_item = rumps.MenuItem("Жду флешку")
-        self.stop_item = rumps.MenuItem("Остановить обработку")
+        self._icon_state = None
+        self._video_keys = None
+
+        # Верх: что происходит сейчас
+        self.status_item = rumps.MenuItem("status")
+        self.status_view = views.status_view(mm.StatusBlock(title="Жду флешку"))
+        self.status_item._menuitem.setView_(self.status_view)
+        self.stop_item = rumps.MenuItem("Остановить обработку", callback=self.stop_processing)
+
+        # Ролики и частые действия
         self.videos_menu = rumps.MenuItem("Ролики")
-        self.youtube_item = rumps.MenuItem("Войти в YouTube…", callback=self.toggle_youtube)
-        self.denoise_menu = rumps.MenuItem("Шумоподавление")
-        for key, label in DENOISE.items():
-            self.denoise_menu.add(rumps.MenuItem(label, callback=self._set_denoise(key)))
-        self.mode_menu = rumps.MenuItem("Загрузка на YouTube")
-        for key, label in MODES.items():
-            self.mode_menu.add(rumps.MenuItem(label, callback=self._set_mode(key)))
-        self.login_item = rumps.MenuItem("Запускать при входе в систему", callback=self.toggle_login_item)
-        self.auto_item = rumps.MenuItem("Автоцвет (как «Авто» в Lumetri)", callback=self.toggle_auto)
-        self.copy_item = rumps.MenuItem("Копировать клипы на Mac", callback=self.toggle_copy)
-        self.quality_menu = rumps.MenuItem("Качество видео")
-        for h, label in QUALITY.items():
-            self.quality_menu.add(rumps.MenuItem(label, callback=self._set_quality(h)))
+        self.videos_menu.add(rumps.MenuItem("…"))
+
+        # Настройки
+        self.youtube_menu = rumps.MenuItem("YouTube")
+        self.processing_menu = rumps.MenuItem("Обработка")
+        self.app_menu = rumps.MenuItem("Приложение")
+        self.quit_item = rumps.MenuItem("Выйти", callback=self.quit_app, key="q")
+
         self.menu = [
             self.status_item,
             self.stop_item,
             None,
-            rumps.MenuItem("Обработать папку с клипами…", callback=self.process_folder),
             self.videos_menu,
+            rumps.MenuItem("Обработать папку…", callback=self.process_folder),
             rumps.MenuItem("Открыть архив", callback=lambda _: macos.open_path(self.config.archive)),
-            rumps.MenuItem("Вернуть клипы, отмеченные как обработанные…", callback=self.forget_skipped),
             None,
-            self.youtube_item,
-            rumps.MenuItem("Проверить загрузку на YouTube…", callback=self.test_upload),
-            self.mode_menu,
+            self.youtube_menu,
+            self.processing_menu,
+            self.app_menu,
             None,
-            rumps.MenuItem("Выбрать LUT…", callback=self.choose_lut),
-            self.auto_item,
-            self.quality_menu,
-            self.copy_item,
-            self.denoise_menu,
-            rumps.MenuItem("Папка архива…", callback=self.choose_archive),
-            self.login_item,
-            rumps.MenuItem("Открыть журнал", callback=lambda _: macos.open_path(LOG_FILE)),
-            None,
-            rumps.MenuItem("Выйти", callback=lambda _: rumps.quit_application()),
+            self.quit_item,
         ]
-        self._refresh_checks()
-        self.controller.start()
-        rumps.Timer(self._tick, 1).start()
+        self._build_youtube()
+        self._build_processing()
+        self._build_app()
+        self._refresh_settings()
+        if start:
+            self.controller.start()
+            timer = rumps.Timer(self._tick, 1)
+            timer.start()
+            # Пока меню открыто, обновлять блок прогресса тоже
+            NSRunLoop.currentRunLoop().addTimer_forMode_(timer._nstimer, NSEventTrackingRunLoopMode)
+        self._tick(None)
 
-    # ---------- обновление меню (основной поток) ----------
+    # ---------- подменю настроек ----------
+
+    def _build_youtube(self):
+        m = self.youtube_menu
+        self.account_nsitem = NSMenuItem.alloc().init()
+        self.account_view = views.account_view(False)
+        self.account_nsitem.setView_(self.account_view)
+        _raw(m, self.account_nsitem)
+        self.login_item = rumps.MenuItem("Войти…", callback=self.toggle_youtube)
+        m.add(self.login_item)
+        m.add(rumps.separator)
+        _raw(m, _header("Способ загрузки"))
+        self.mode_manual = rumps.MenuItem("Вручную через YouTube Studio", callback=self._set_mode("manual"))
+        self.mode_api = rumps.MenuItem("Автоматически «по ссылке»", callback=self._set_mode("api"))
+        m.add(self.mode_manual)
+        m.add(self.mode_api)
+        _raw(m, _note("До аудита API YouTube делает такие видео приватными"))
+        m.add(rumps.separator)
+        self.test_item = rumps.MenuItem("Проверить загрузку…", callback=self.test_upload)
+        m.add(self.test_item)
+
+    def _build_processing(self):
+        m = self.processing_menu
+        _raw(m, _header("Качество видео"))
+        self.q1080 = rumps.MenuItem("1080p", callback=self._set_quality(1080))
+        self.q2160 = rumps.MenuItem("4K", callback=self._set_quality(2160))
+        m.add(self.q1080)
+        m.add(self.q2160)
+        _set_title(self.q1080, "1080p", "меньше места, быстрее")
+        m.add(rumps.separator)
+        self.auto_item = rumps.MenuItem("Автоцвет", callback=self.toggle_auto)
+        m.add(self.auto_item)
+        self.denoise_menu = rumps.MenuItem("Шумоподавление")
+        self.denoise_items = {}
+        for key, (label, hint) in mm.DENOISE.items():
+            item = rumps.MenuItem(label, callback=self._set_denoise(key))
+            self.denoise_menu.add(item)
+            if hint:
+                _set_title(item, label, hint)
+            self.denoise_items[key] = item
+        m.add(self.denoise_menu)
+        self.lut_item = rumps.MenuItem("LUT…", callback=self.choose_lut)
+        m.add(self.lut_item)
+        m.add(rumps.separator)
+        self.copy_item = rumps.MenuItem("Копировать клипы на Mac", callback=self.toggle_copy)
+        m.add(self.copy_item)
+
+    def _build_app(self):
+        m = self.app_menu
+        self.archive_item = rumps.MenuItem("Папка архива…", callback=self.choose_archive)
+        m.add(self.archive_item)
+        self.login_at_start = rumps.MenuItem("Запускать при входе в систему", callback=self.toggle_login_item)
+        m.add(self.login_at_start)
+        m.add(rumps.separator)
+        m.add(rumps.MenuItem("Вернуть клипы, отмеченные как обработанные…", callback=self.forget_skipped))
+        m.add(rumps.MenuItem("Открыть журнал", callback=lambda _: macos.open_path(LOG_FILE)))
+        m.add(rumps.separator)
+        version = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(f"improv-video {__version__}", None, "")
+        version.setEnabled_(False)
+        _raw(m, version)
+
+    def _refresh_settings(self):
+        """Галочки и значения справа — после любого изменения настроек."""
+        c, cfg = self.controller, self.config
+        signed = c.signed_in
+        _set_title(self.youtube_menu, "YouTube", mm.youtube_value(signed, cfg.upload_mode))
+        _set_title(self.processing_menu, "Обработка", mm.quality_value(cfg.max_height))
+        self.login_item.title = "Выйти" if signed else "Войти…"
+        if self.account_view.signed_in != signed:
+            self.account_view.signed_in = signed
+            self.account_view.setNeedsDisplay_(True)
+        self.mode_manual.state = int(cfg.upload_mode != "api")
+        self.mode_api.state = int(cfg.upload_mode == "api")
+        self.mode_api.set_callback(self._set_mode("api") if signed else None)
+        self.test_item.set_callback(self.test_upload if signed else None)
+
+        self.q1080.state = int(cfg.max_height < 2160)
+        self.q2160.state = int(cfg.max_height >= 2160)
+        self.auto_item.state = int(cfg.auto_brightness)
+        label, _ = mm.DENOISE.get(cfg.denoise, mm.DENOISE["medium"])
+        _set_title(self.denoise_menu, "Шумоподавление", label)
+        for key, item in self.denoise_items.items():
+            item.state = int(cfg.denoise == key)
+        lut = mm.ellipsize_middle(Path(cfg.lut).name) if cfg.lut else "не выбран"
+        _set_title(self.lut_item, "LUT:", lut + "…")
+        self.copy_item.state = int(cfg.copy_clips)
+
+        archive = mm.short_path(str(Path(cfg.archive).expanduser()), str(Path.home()))
+        _set_title(self.archive_item, "Папка архива:", mm.ellipsize_middle(archive, 30) + "…")
+        self.login_at_start.state = int(macos.launch_at_login_enabled())
+
+    # ---------- обновление раз в секунду ----------
 
     def _tick(self, _):
         c = self.controller
-        progress = c.progress
-        self.title = f"⏳ {progress.overall():.0%}" if progress else ("⏳" if c.busy else "🎬")
-        self.status_item.title = c.status
-        self.stop_item.set_callback(self.stop_processing if c.busy else None)
-        self.youtube_item.title = "Выйти из YouTube" if c.signed_in else "Войти в YouTube…"
         try:
-            items = c.videos()
-        except Exception:  # noqa: BLE001 — журнал занят или недоступен: покажем в следующую секунду
-            return
-        rows = [(it.key, f"{it.title} — {it.detail}") for it in items]
-        if rows != getattr(self, "_video_rows", None):
-            self._video_rows = rows
-            self.videos_menu.clear()
-            if not items:
-                self.videos_menu.add(rumps.MenuItem("Роликов пока нет"))
-            for it in items:
-                self.videos_menu.add(rumps.MenuItem(f"{it.title} — {it.detail}", callback=self._video_action(it)))
+            videos = c.videos()
+        except Exception:  # noqa: BLE001 — журнал занят: покажем в следующую секунду
+            videos = []
+        busy = c.busy
+        model = mm.status_block(progress=c.progress, status=c.status, busy=busy, note=c.note, videos=videos)
+        if self.status_view.update(model):
+            menu = self.status_item._menuitem.menu()
+            if menu is not None:
+                menu.itemChanged_(self.status_item._menuitem)
+        self.stop_item._menuitem.setHidden_(not busy)
+        self.quit_item.title = "Выйти…" if busy else "Выйти"
+        self._update_icon(*mm.icon_state(progress=c.progress, busy=busy, videos=videos))
 
-    def _video_action(self, it):
+        tracking = NSRunLoop.currentRunLoop().currentMode() == NSEventTrackingRunLoopMode
+        if not tracking:  # подменю перестраиваем только при закрытом меню
+            key = (c.signed_in, self.config.lut, self.config.archive)
+            if key != self._settings_key:  # вход в YouTube, LUT и папка меняются не из меню
+                self._settings_key = key
+                self._refresh_settings()
+            self._refresh_videos(videos)
+
+    _settings_key = None
+
+    def _update_icon(self, state: str, text: str) -> None:
+        key = (state, text)
+        if key == self._icon_state:
+            return
+        item = getattr(getattr(self, "_nsapp", None), "nsstatusitem", None)
+        if item is None:
+            return
+        self._icon_state = key
+        button = item.button()
+        button.setImage_(views.menubar_image(state))
+        button.setImagePosition_(NSImageLeft)
+        button.setAttributedTitle_(NSAttributedString.alloc().initWithString_attributes_(
+            f" {text}" if text else "",
+            {NSFontAttributeName: NSFont.monospacedDigitSystemFontOfSize_weight_(13, 0.23)}))
+
+    def _refresh_videos(self, videos) -> None:
+        rows = [mm.video_row(v) for v in videos]
+        keys = [(r.key, r.status if r.item else "", r.title, r.detail) for r in rows]
+        waiting = mm.waiting_count(videos)
+        _set_title(self.videos_menu, "Ролики", str(waiting) if waiting else "")
+        if keys == self._video_keys:
+            return
+        self._video_keys = keys
+        m = self.videos_menu
+        m.clear()
+        if not rows:
+            item = NSMenuItem.alloc().init()
+            item.setView_(views.note_view("Роликов пока нет", "Появятся после первой флешки или «Обработать папку…»",
+                                          300, (12, 10, 12)))
+            _raw(m, item)
+            return
+        for row in rows:
+            item = rumps.MenuItem(row.key, callback=(lambda _, r=row: self._video_action(r)) if row.action else None)
+            item._menuitem.setView_(views.video_row_view(row, self._video_action))
+            m.add(item)
+        m.add(rumps.separator)
+        note = NSMenuItem.alloc().init()
+        note.setView_(views.note_view(
+            None, "Последние 10 роликов · не собранный день повторится при следующей вставке флешки",
+            views.VIDEOS_WIDTH, (28, 3, 4)))
+        _raw(m, note)
+
+    def _video_action(self, row) -> None:
         """Клик по строке «Ролики» — действие по статусу."""
-        c = self.controller
-        if it.status == "kind_needed":
-            return lambda _: c.ask_kind(it.day)
-        if it.status in ("manual", "handed") and it.video_id:
-            return lambda _: c.submit("hand_off_video", it.video_id)
-        if it.status == "uploaded" and it.url:
-            return lambda _: macos.open_path(it.url)
-        if it.status == "failed":
-            return lambda _: macos.open_path(LOG_FILE)
-        return None
+        c, it = self.controller, row.item
+        if row.action == "kind":
+            c.ask_kind(it.day)
+        elif row.action == "hand_off" and it.video_id:
+            c.submit("hand_off_video", it.video_id)
+        elif row.action == "open_url" and it.url:
+            macos.open_path(it.url)
+        elif row.action == "open_log":
+            macos.open_path(LOG_FILE)
+
+    # ---------- действия ----------
 
     def stop_processing(self, _):
         self.controller.stop_processing()
 
+    def quit_app(self, _):
+        if self.controller.busy:
+            label = self.controller.progress.label if self.controller.progress else "Несобранный день"
+            NSApp.activateIgnoringOtherApps_(True)
+            alert = NSAlert.alloc().init()
+            alert.setMessageText_("Остановить обработку и выйти?")
+            alert.setInformativeText_(f"{label} соберётся заново при следующей вставке флешки.")
+            quit_button = alert.addButtonWithTitle_("Выйти")
+            if hasattr(quit_button, "setHasDestructiveAction_"):
+                quit_button.setHasDestructiveAction_(True)
+            alert.addButtonWithTitle_("Отмена")
+            if alert.runModal() != NSAlertFirstButtonReturn:
+                return
+            self.controller.stop_processing()
+        rumps.quit_application()
+
     def toggle_youtube(self, _):
         self.controller.submit("logout" if self.controller.signed_in else "login")
 
-    def _refresh_checks(self):
-        for key, label in DENOISE.items():
-            self.denoise_menu[label].state = int(self.config.denoise == key)
-        for key, label in MODES.items():
-            self.mode_menu[label].state = int(self.config.upload_mode == key)
-        self.login_item.state = int(macos.launch_at_login_enabled())
-        self.auto_item.state = int(self.config.auto_brightness)
-        self.copy_item.state = int(self.config.copy_clips)
-        for h, label in QUALITY.items():
-            self.quality_menu[label].state = int(self.config.max_height == h)
-
-    # ---------- действия ----------
+    def _changed(self):
+        self.config.save()
+        self._refresh_settings()
 
     def _set_denoise(self, key):
         def cb(_):
             self.config.denoise = key
-            self.config.save()
-            self._refresh_checks()
+            self._changed()
         return cb
 
     def _set_mode(self, key):
         def cb(_):
             self.config.upload_mode = key
-            self.config.save()
-            self._refresh_checks()
+            self._changed()
             if key == "api":
                 self.controller.submit("deliver")
         return cb
 
-    def toggle_copy(self, _):
-        self.config.copy_clips = not self.config.copy_clips
-        self.config.save()
-        self._refresh_checks()
-
     def _set_quality(self, h):
         def cb(_):
             self.config.max_height = h
-            self.config.save()
-            self._refresh_checks()
+            self._changed()
         return cb
+
+    def toggle_copy(self, _):
+        self.config.copy_clips = not self.config.copy_clips
+        self._changed()
 
     def toggle_auto(self, _):
         self.config.auto_brightness = not self.config.auto_brightness
-        self.config.save()
-        self._refresh_checks()
+        self._changed()
 
     def toggle_login_item(self, _):
         macos.set_launch_at_login(not macos.launch_at_login_enabled())
-        self._refresh_checks()
+        self._refresh_settings()
 
     @_in_thread
     def forget_skipped(self, _):
@@ -197,6 +416,42 @@ class MenuBarApp(rumps.App):
             self.config.archive = str(folder)
             self.config.save()
             macos.notify("improv-video", "Папка архива изменена — перезапустите приложение")
+
+
+def describe_menu(menu, depth: int = 0) -> list[str]:
+    """Текстовый слепок меню для самопроверки: заголовки, галочки, скрытые и неактивные пункты."""
+    lines = []
+    for i in range(menu.numberOfItems()):
+        item = menu.itemAtIndex_(i)
+        if item.isSeparatorItem():
+            lines.append("  " * depth + "—")
+            continue
+        title = item.attributedTitle().string() if item.attributedTitle() else item.title()
+        flags = []
+        if item.state():
+            flags.append("✓")
+        if item.isHidden():
+            flags.append("скрыт")
+        if item.view() is not None:
+            flags.append(f"view {type(item.view()).__name__} {item.view().frame().size.height:.0f}pt")
+        elif not item.isEnabled() or (item.action() is None and not item.hasSubmenu()):
+            flags.append("неактивен")
+        lines.append("  " * depth + title.replace("\t", " │ ") + (f"  [{', '.join(flags)}]" if flags else ""))
+        if item.hasSubmenu():
+            lines += describe_menu(item.submenu(), depth + 1)
+    return lines
+
+
+def render_selftest(outdir: Path) -> int:
+    """Для CI: картинки нарисованных частей и слепок меню без запуска приложения."""
+    written = views.render_demo(outdir)
+    app = MenuBarApp(start=False)
+    app._refresh_videos([])
+    text = describe_menu(app._menu._menu if hasattr(app._menu, "_menu") else app._menu)
+    (outdir / "menu.txt").write_text("\n".join(text) + "\n", encoding="utf-8")
+    print("\n".join(text))
+    print(f"{len(written)} картинок в {outdir}")
+    return 0
 
 
 def main() -> None:

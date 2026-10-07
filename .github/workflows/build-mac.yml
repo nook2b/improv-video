@@ -69,6 +69,14 @@ jobs:
       - name: Самопроверка собранного приложения
         run: dist/improv-video.app/Contents/MacOS/improv-video --selftest
 
+      - name: Картинки меню (светлая и тёмная тема) и слепок меню
+        run: dist/improv-video.app/Contents/MacOS/improv-video --render-ui ui-snapshots
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ui-snapshots
+          path: ui-snapshots
+
       - name: Замер скорости цветовой обработки 4K
         run: dist/improv-video.app/Contents/MacOS/improv-video --bench calibration/AcePro2_I-Log_To_Rec.709_V1.0.cube
 
