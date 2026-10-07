@@ -282,7 +282,7 @@ class MenuBarApp(rumps.App):
 
     def _refresh_videos(self, videos) -> None:
         rows = [mm.video_row(v) for v in videos]
-        keys = [(r.key, r.status if r.item else "", r.title, r.detail) for r in rows]
+        keys = [(r.key, r.item.status, r.title, r.detail, r.fraction) for r in rows]
         waiting = mm.waiting_count(videos)
         _set_title(self.videos_menu, "Ролики", str(waiting) if waiting else "")
         if keys == self._video_keys:
@@ -439,7 +439,21 @@ def render_selftest(outdir: Path) -> int:
     from . import dialogs
 
     written = views.render_demo(outdir) + dialogs.render_demo(outdir)
+    from datetime import date
+
+    from ..progress import DayProgress
+
     app = MenuBarApp(start=False)
+    # Прогнать меню со всеми состояниями, как в работе: ролики всех статусов, сборка, пусто
+    _, rows = views.demo_models()
+    videos = [r.item for r in rows]
+    app._refresh_videos(videos)
+    app._refresh_videos(videos)  # без изменений — ветка «ничего не делать»
+    app.controller.progress = DayProgress("Тренировка 06.10.2026", 1, 2, reading_card=True, day=date(2026, 10, 6))
+    app.controller.progress.start("encode")
+    app._tick(None)
+    app.controller.progress = None
+    app._tick(None)
     app._refresh_videos([])
     text = describe_menu(app._menu._menu if hasattr(app._menu, "_menu") else app._menu)
     (outdir / "menu.txt").write_text("\n".join(text) + "\n", encoding="utf-8")

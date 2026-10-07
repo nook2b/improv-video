@@ -17,7 +17,7 @@ app = BUNDLE(
     bundle_identifier="com.nook2b.improv-video",
     info_plist={
         "LSUIElement": True,  # только иконка в менюбаре, без Dock
-        "CFBundleShortVersionString": "0.1.7",
+        "CFBundleShortVersionString": "0.1.8",
         "LSMinimumSystemVersion": "13.0",
         "NSRemovableVolumesUsageDescription": "improv-video копирует клипы с карты камеры.",
     },
