@@ -88,6 +88,15 @@ jobs:
           name: improv-video-mac
           path: improv-video-mac.zip
 
+      - name: Картинки меню в лог (для проверки без доступа к артефактам)
+        run: |
+          mkdir -p small
+          for f in ui-snapshots/*-light.png; do
+            w=$(sips -g pixelWidth "$f" | awk '/pixelWidth/ {print $2}')
+            sips --resampleWidth $((w / 2)) "$f" --out "small/$(basename "$f")" >/dev/null
+            echo "PNG $(basename "$f") $(base64 -i "small/$(basename "$f")" | tr -d '\n')"
+          done
+
       - name: Релиз (для тегов v*)
         if: startsWith(github.ref, 'refs/tags/v')
         env:

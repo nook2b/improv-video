@@ -123,3 +123,28 @@ def set_launch_at_login(enabled: bool) -> None:
         "RunAtLoad": True,
     }
     LAUNCH_AGENT.write_bytes(plistlib.dumps(plist))
+
+
+# ---------- окна по дизайну (improv_video.app.dialogs) ----------
+
+def ask_kind(day, meta: str = "", note: str = "", default: str = "training", timeout: float | None = None):
+    from . import dialogs
+
+    return dialogs.ask_kind(dialogs.KindInfo(f"{day:%d.%m.%Y}", meta, note, default), timeout)
+
+
+def ask_first_run(clips: int, days: int):
+    from . import dialogs
+
+    return dialogs.ask_first_run(clips, days)
+
+
+def show_ready(name: str, desc: str, file: Path) -> None:
+    from . import dialogs
+
+    try:
+        size = f"{Path(file).stat().st_size / 1024**3:.1f} ГБ"
+    except OSError:
+        size = ""
+    dialogs.show_ready(dialogs.ReadyInfo(name, desc, Path(file), size),
+                       {"copy": copy_to_clipboard, "reveal": reveal})

@@ -419,7 +419,7 @@ class AccountView(NSView):
             draw_icon("youtube", x + 6, y + 6, 16, color("text-tertiary", dark))
         tx = x + 28 + 10
         if self.signed_in:
-            draw_line("YouTube", tx, y, 15, font(13, 600), color("text-primary", dark))
+            draw_line(self.name or "YouTube", tx, y, 15, font(13, 600), color("text-primary", dark))
             status_dot(tx + 3, y + 15 + 3 + 7, "success", dark)
             draw_line("Вход сохранён", tx + 11, y + 15 + 3, 14, font(12), color("text-secondary", dark))
         else:
@@ -451,9 +451,9 @@ def note_view(title: str | None, text: str, width: float, inset: tuple[float, fl
     return view
 
 
-def account_view(signed_in: bool) -> AccountView:
+def account_view(signed_in: bool, name: str = "") -> AccountView:
     view = AccountView.alloc().initWithFrame_(NSMakeRect(0, 0, 280, 7 + 28 + 8))
-    view.signed_in = signed_in
+    view.signed_in, view.name = signed_in, name
     return view
 
 
@@ -522,7 +522,7 @@ def render_demo(outdir: Path) -> list[Path]:
             written.append(path)
         for signed in (True, False):
             path = outdir / f"account-{'in' if signed else 'out'}-{theme}.png"
-            render_png(account_view(signed), path, dark)
+            render_png(account_view(signed, "Иван improv"), path, dark)
             written.append(path)
         note = note_view(None, "Последние 10 роликов · не собранный день повторится при следующей вставке флешки",
                          VIDEOS_WIDTH, (28, 3, 4))

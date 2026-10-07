@@ -13,9 +13,6 @@ from pathlib import Path
 
 import rumps
 from AppKit import (
-    NSAlert,
-    NSAlertFirstButtonReturn,
-    NSApp,
     NSAttributedString,
     NSColor,
     NSEventTrackingRunLoopMode,
@@ -154,7 +151,7 @@ class MenuBarApp(rumps.App):
     def _build_youtube(self):
         m = self.youtube_menu
         self.account_nsitem = NSMenuItem.alloc().init()
-        self.account_view = views.account_view(False)
+        self.account_view = views.account_view(False, self.config.channel_name)
         self.account_nsitem.setView_(self.account_view)
         _raw(m, self.account_nsitem)
         self.login_item = rumps.MenuItem("Войти…", callback=self.toggle_youtube)
@@ -314,7 +311,8 @@ class MenuBarApp(rumps.App):
         """Клик по строке «Ролики» — действие по статусу."""
         c, it = self.controller, row.item
         if row.action == "kind":
-            c.ask_kind(it.day)
+            span = it.detail.partition(" · ")[2]  # «Ждёт выбора типа · 18:05–20:40»
+            c.ask_kind(it.day, span)
         elif row.action == "hand_off" and it.video_id:
             c.submit("hand_off_video", it.video_id)
         elif row.action == "open_url" and it.url:
@@ -329,16 +327,10 @@ class MenuBarApp(rumps.App):
 
     def quit_app(self, _):
         if self.controller.busy:
+            from . import dialogs
+
             label = self.controller.progress.label if self.controller.progress else "Несобранный день"
-            NSApp.activateIgnoringOtherApps_(True)
-            alert = NSAlert.alloc().init()
-            alert.setMessageText_("Остановить обработку и выйти?")
-            alert.setInformativeText_(f"{label} соберётся заново при следующей вставке флешки.")
-            quit_button = alert.addButtonWithTitle_("Выйти")
-            if hasattr(quit_button, "setHasDestructiveAction_"):
-                quit_button.setHasDestructiveAction_(True)
-            alert.addButtonWithTitle_("Отмена")
-            if alert.runModal() != NSAlertFirstButtonReturn:
+            if not dialogs.confirm_quit(label):
                 return
             self.controller.stop_processing()
         rumps.quit_application()
@@ -444,7 +436,9 @@ def describe_menu(menu, depth: int = 0) -> list[str]:
 
 def render_selftest(outdir: Path) -> int:
     """Для CI: картинки нарисованных частей и слепок меню без запуска приложения."""
-    written = views.render_demo(outdir)
+    from . import dialogs
+
+    written = views.render_demo(outdir) + dialogs.render_demo(outdir)
     app = MenuBarApp(start=False)
     app._refresh_videos([])
     text = describe_menu(app._menu._menu if hasattr(app._menu, "_menu") else app._menu)

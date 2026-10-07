@@ -26,6 +26,7 @@ class AppConfig:
     # api — после аудита: загрузка «по ссылке» сама.
     upload_mode: str = "manual"
     last_kind: str = "training"
+    channel_name: str = "Иван improv"  # подпись в подменю YouTube
 
     @classmethod
     def load(cls, path: Path | None = None) -> "AppConfig":

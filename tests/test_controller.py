@@ -10,6 +10,7 @@ class FakeUI:
     def __init__(self, answers):
         self.answers = answers  # подстрока вопроса → ответ
         self.asked, self.notes, self.clipboard, self.opened, self.revealed = [], [], [], [], []
+        self.ready = []
         self.lock = threading.Lock()
 
     def dialog(self, text, buttons, default=None, title="", giving_up_after=None):
@@ -18,7 +19,19 @@ class FakeUI:
         for key, answer in self.answers.items():
             if key in text:
                 return answer
-        return buttons[-1]
+        return buttons[-1] if buttons else None
+
+    def ask_first_run(self, clips, days):
+        answer = self.dialog(f"На карте {clips} клипов за {days} дн. — первый запуск", [])
+        return {"Обработать все": "all", "Считать обработанными": "skip"}.get(answer)
+
+    def ask_kind(self, day, meta="", note="", default="training", timeout=None):
+        answer = self.dialog(f"Что снимали {day:%d.%m.%Y}? {meta}", [])
+        return {"Тренировка": "training", "Занятие": "lesson"}.get(answer)
+
+    def show_ready(self, name, desc, file):
+        with self.lock:
+            self.ready.append((name, desc, Path(file)))
 
     def notify(self, title, text):
         self.notes.append((title, text))
@@ -64,8 +77,11 @@ def test_card_to_manual_upload(card, tmp_path, monkeypatch):
     assert all(p.name.startswith("video") for p in ui.revealed)
     assert AppConfig.load(tmp_path / "config.json").last_kind in ("lesson", "training")
     assert any("готов за" in t for _, t in ui.notes)
+    assert any("Что снимали 01.10.2026? 18:05–" in q and "клипа" in q for q in ui.asked)
+    assert sorted(n for n, _, _ in ui.ready) == ["Занятие 01.10.2026", "Тренировка 03.10.2026"]
     statuses = {it.title: it.status for it in c.videos()}
-    assert statuses == {"Занятие 01.10.2026": "manual", "Тренировка 03.10.2026": "manual"}
+    # «Готово» в окне «Ролик готов» → передан в Studio
+    assert statuses == {"Занятие 01.10.2026": "handed", "Тренировка 03.10.2026": "handed"}
 
 
 def test_no_new_clips_note(card, tmp_path):

@@ -20,12 +20,19 @@ from ..naming import KINDS, title
 from ..pipeline import (NotEnoughSpace, VideoItem, build_pending, import_card, mark_existing_as_done,
                         new_clips_on_card, recent_videos, source_folders, upload_ready, video_metadata)
 from ..progress import DayProgress, minutes
+
+
+def shooting_meta(start, end, seconds: float, clips: int) -> str:
+    """«18:05–20:40 · 1.5 ч · 12 клипов» для окна «Что снимали?»."""
+    length = f"{seconds / 3600:.1f} ч" if seconds >= 3600 else minutes(seconds)
+    word = "клип" if clips % 10 == 1 and clips % 100 != 11 else (
+        "клипа" if 2 <= clips % 10 <= 4 and not 12 <= clips % 100 <= 14 else "клипов")
+    return f"{start:%H:%M}–{end:%H:%M} · {length} · {clips} {word}"
 from ..state import State
 from .config import SUPPORT_DIR, AppConfig
 
 log = logging.getLogger("improv-video")
 
-KIND_BY_LABEL = {label: kind for kind, label in KINDS.items()}
 STUDIO_URL = "https://studio.youtube.com"
 IDLE = "Жду флешку"
 RETRY_SECONDS = 30 * 60
@@ -212,11 +219,10 @@ class Controller:
             return
         if self.state.is_empty():
             days = len({c.start.date() for c in clips})
-            answer = self.ui.dialog(
-                f"На карте {len(clips)} клипов примерно за {days} дн. Это первый запуск: "
-                "обработать их все или считать уже обработанными?",
-                ["Считать обработанными", "Обработать все"], default="Обработать все")
-            if answer != "Обработать все":
+            answer = self.ui.ask_first_run(len(clips), days)
+            if answer is None:
+                return  # окно закрыли — спросим при следующей вставке
+            if answer != "all":
                 n = mark_existing_as_done(path, self.state, settings)
                 self._say("improv-video", f"{n} клипов помечены как обработанные. Новые съёмки пойдут автоматически.")
                 return
@@ -227,10 +233,13 @@ class Controller:
                 self._save_config()
                 settings = self.config.settings()
         with self.ui.keep_awake():
+            summary: dict = {}
             days = import_card(path, self.state, settings, self._progress,
-                               on_copy=lambda f: setattr(self, "status", f"Копирование клипов · {f:.0%}"))
-            for day in days:
-                self._spawn(self._ask_kind, day)
+                               on_copy=lambda f: setattr(self, "status", f"Копирование клипов · {f:.0%}"),
+                               summary=summary)
+            for n, day in enumerate(sorted(days), 1):
+                note = f"день {n} из {len(days)}" if len(days) > 1 else ""
+                self._spawn(self._ask_kind, day, shooting_meta(*summary[day]) if day in summary else "", note)
             # Новые дни и те, что раньше не собрались (флешку вынули, сбой)
             todo = sorted(set(days) | set(self.state.days_with_unassigned()))
             for n, day in enumerate(todo, 1):
@@ -256,12 +265,10 @@ class Controller:
                 self._say("improv-video", "Можно извлечь флешку")
             self._do_deliver()
 
-    def _ask_kind(self, day: date) -> None:
-        labels = list(KINDS.values())
-        answer = self.ui.dialog(f"Что снимали {day:%d.%m.%Y}?", labels,
-                                default=KINDS.get(self.config.last_kind), giving_up_after=KIND_WAIT_SECONDS)
-        if answer in KIND_BY_LABEL:
-            self.submit("kind", day, KIND_BY_LABEL[answer])
+    def _ask_kind(self, day: date, meta: str = "", note: str = "") -> None:
+        kind = self.ui.ask_kind(day, meta, note, self.config.last_kind, KIND_WAIT_SECONDS)
+        if kind in KINDS:
+            self.submit("kind", day, kind)
 
     def _do_kind(self, day: date, kind: str) -> None:
         self.state.set_day_kind(day, kind)
@@ -293,7 +300,7 @@ class Controller:
             name, desc, _ = video_metadata(row)
             self.state.update_video(row["id"], status="manual")
             self.manual = ([(name, desc, Path(row["file"]))] + self.manual)[:10]
-            self._spawn(self._hand_off, name, desc, Path(row["file"]))
+            self._spawn(self._hand_off, name, desc, Path(row["file"]), row["id"])
 
     def _progress_upload(self, text: str) -> None:
         self._progress(text)
@@ -307,34 +314,30 @@ class Controller:
             return
         name, desc, _ = video_metadata(row)
         self.state.update_video(video_id, status="manual")
-        self._spawn(self._hand_off, name, desc, Path(row["file"]))
+        self._spawn(self._hand_off, name, desc, Path(row["file"]), video_id)
 
-    def ask_kind(self, day: date) -> None:
+    def _do_handed(self, video_id: int) -> None:
+        """«Готово» в окне «Ролик готов»: ролик передан в YouTube Studio."""
+        row = self.state.video(video_id)
+        if row and row["status"] == "manual":
+            self.state.update_video(video_id, status="handed")
+
+    def ask_kind(self, day: date, meta: str = "") -> None:
         """Строка «Ждёт выбора типа» в списке «Ролики»."""
-        self._spawn(self._ask_kind, day)
+        self._spawn(self._ask_kind, day, meta)
 
     def hand_off(self, name: str, desc: str, file: Path) -> None:
         """Ручная загрузка (из меню): можно повторить для любого из последних роликов."""
         self._spawn(self._hand_off, name, desc, file)
 
-    def _hand_off(self, name: str, desc: str, file: Path) -> None:
+    def _hand_off(self, name: str, desc: str, file: Path, video_id: int | None = None) -> None:
+        """Окно «Ролик готов»: Finder с файлом, YouTube Studio, название в буфере."""
         self.ui.copy_to_clipboard(name)
         self.ui.reveal(file)
         self.ui.open_path(STUDIO_URL)
-        text = (f"«{name}» готово.\n\n"
-                "1. В YouTube Studio нажмите «Создать → Добавить видео» и перетащите выделенный файл.\n"
-                "2. Название уже скопировано — вставьте его (⌘V).\n"
-                f"3. Описание: {desc}\n"
-                "4. Видимость — «Доступ по ссылке».")
-        while True:
-            answer = self.ui.dialog(text, ["Скопировать название", "Скопировать описание", "Готово"],
-                                    default="Готово")
-            if answer == "Скопировать название":
-                self.ui.copy_to_clipboard(name)
-            elif answer == "Скопировать описание":
-                self.ui.copy_to_clipboard(desc)
-            else:
-                return
+        self.ui.show_ready(name, desc, file)
+        if video_id is not None:
+            self.submit("handed", video_id)
 
     # ---------- YouTube ----------
 

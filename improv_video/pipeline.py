@@ -134,7 +134,8 @@ def _copy_verified(src: Path, dst: Path, copied: Callable[[int], None] | None = 
 
 
 def import_card(volume: Path, state: State, settings: Settings, notify: Notify = print,
-                on_copy: Callable[[float], None] | None = None) -> dict[date, list[str]]:
+                on_copy: Callable[[float], None] | None = None,
+                summary: dict | None = None) -> dict[date, list[str]]:
     """Регистрирует новые клипы; при copy_clips копирует их в архив/ГГГГ-ММ-ДД/.
 
     Возвращает {день: [имена клипов]}. Без копирования клипы читаются с флешки при сборке.
@@ -164,6 +165,9 @@ def import_card(volume: Path, state: State, settings: Settings, notify: Notify =
             on_copy(done / max(clips_bytes, 1))
 
     for day, recordings in days.items():
+        if summary is not None:  # для окна «Что снимали?»: начало, конец, длительность, клипов
+            summary[day] = (recordings[0].start, recordings[-1].end, sum(r.duration for r in recordings),
+                            sum(len(r.parts) for r in recordings))
         folder = settings.archive / day.isoformat()
         folder.mkdir(exist_ok=True)
         for rec in recordings:
