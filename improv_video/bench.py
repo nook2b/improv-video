@@ -27,6 +27,14 @@ CHAINS = {
     "сейчас (2 пересчёта, LUT с поправкой)": (
         "scale=in_range=pc:in_color_matrix=bt709,format=gbrp10le,lut3d=file=lut.cube:interp=tetrahedral,"
         "scale=out_color_matrix=bt709:out_range=tv,format=p010le"),
+    "1080p: LUT на 4K, потом уменьшение (было)": (
+        "scale=in_range=pc:in_color_matrix=bt709,format=gbrp10le,lut3d=file=lut.cube:interp=tetrahedral,"
+        "scale=1920:1080:force_original_aspect_ratio=decrease:flags=lanczos:out_color_matrix=bt709:out_range=tv,"
+        "format=p010le"),
+    "1080p: уменьшение, потом LUT (стало)": (
+        "scale=1920:1080:force_original_aspect_ratio=decrease:flags=lanczos:in_range=pc:in_color_matrix=bt709,"
+        "format=gbrp10le,lut3d=file=lut.cube:interp=tetrahedral,scale=out_color_matrix=bt709:out_range=tv,"
+        "format=p010le"),
     "2 пересчёта, float": (
         "scale=in_range=pc:in_color_matrix=bt709,format=gbrpf32le,lut3d=file=lut.cube:interp=tetrahedral,"
         "scale=out_color_matrix=bt709:out_range=tv,format=p010le"),
@@ -90,16 +98,16 @@ def main(argv: list[str]) -> int:
                 "-i", "sine=f=300:d=20:sample_rate=48000", "-vf", "scale=out_range=pc", "-pix_fmt", "yuvj420p",
                 "-c:v", "libx265", "-preset", "ultrafast", "-x265-params", "log-level=error",
                 "-c:a", "aac", "-ac", "2", str(day_clip)])
-        for workers in (1, auto_workers()):
+        for height, workers in ((2160, 1), (2160, auto_workers()), (1080, auto_workers())):
             settings = Settings(archive=work, lut=work / "lut.cube", profile="ilog", denoise="medium",
                                 rnnoise_model=resources_dir() / "rnnoise" / "bd.rnnn", workers=workers,
-                                chunk_seconds=5)
+                                chunk_seconds=5, max_height=height)
             t0 = time.monotonic()
-            r = build_day(date(2026, 10, 1), [day_clip], "training", 1, settings, work / f"day{workers}.mp4",
-                          notify=lambda _: None)
+            r = build_day(date(2026, 10, 1), [day_clip], "training", 1, settings,
+                          work / f"day{height}_{workers}.mp4", notify=lambda _: None)
             dt = time.monotonic() - t0
             frames = 20 * 30000 / 1001
-            print(f"полная сборка ({workers} процесс.): {frames / dt:.1f} к/с, "
+            print(f"полная сборка {height}p ({workers} процесс.): {frames / dt:.1f} к/с, "
                   f"2 часа видео ≈ {2 * 3600 * 30000 / 1001 / (frames / dt) / 3600:.1f} ч ({r.encoder})", flush=True)
     return 0
 

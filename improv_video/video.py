@@ -104,30 +104,31 @@ def video_filter(target: Target, encoder: str, lut_name: str | None, adjust: str
                  src_range: str = "tv", src_size: tuple[int, int] | None = None) -> str:
     """Цепочка на кадр.
 
-    С LUT — два пересчёта цвета: вход (8 бит, полный диапазон) → RGB 10 бит → LUT (поправка
-    яркости уже запечена в нём) → YUV 10 бит BT.709 с масштабом, если размер отличается.
-    Без LUT — приведение к 10 битам, поправка яркости кривой, масштаб.
+    Порядок ради скорости: сначала лишние кадры отбрасываются (60 → 30 к/с), затем кадр
+    уменьшается до итогового размера, и только потом считается цвет — LUT на 1080p вместо 4K
+    в 4 раза дешевле, а на вид для 1080p-ролика разницы нет.
+    С LUT — два пересчёта цвета: вход (8 бит, полный диапазон) → RGB 10 бит в итоговом размере →
+    LUT (поправка яркости уже запечена в нём) → YUV 10 бит BT.709.
+    Без LUT — приведение к 10 битам в итоговом размере, поправка яркости кривой.
     """
     w, h = target.width, target.height
     same = src_size == (w, h)
     rng = "pc" if src_range == "pc" else "tv"
+    size = "" if same else f"{w}:{h}:force_original_aspect_ratio=decrease:flags=lanczos:"
+    steps = [f"fps={target.fps.numerator}/{target.fps.denominator}"]
     if lut_name:
-        steps = [f"scale=in_range={rng}:in_color_matrix=bt709", "format=gbrp10le",
-                 f"lut3d=file={lut_name}:interp=tetrahedral"]
-        if adjust:
-            steps.insert(0, adjust)
-        size = "" if same else f"{w}:{h}:force_original_aspect_ratio=decrease:flags=lanczos:"
-        steps.append(f"scale={size}out_color_matrix=bt709:out_range=tv")
-    else:
-        steps = [normalize_filter(src_range)]
         if adjust:
             steps.append(adjust)
-        if not same:
-            steps.append(f"scale={w}:{h}:force_original_aspect_ratio=decrease:flags=lanczos"
-                         ":in_color_matrix=bt709:out_color_matrix=bt709:out_range=tv")
+        steps += [f"scale={size}in_range={rng}:in_color_matrix=bt709", "format=gbrp10le",
+                  f"lut3d=file={lut_name}:interp=tetrahedral", "scale=out_color_matrix=bt709:out_range=tv"]
+    else:
+        steps += [f"scale={size}in_range={rng}:out_range=tv:in_color_matrix=bt709:out_color_matrix=bt709",
+                  "format=yuv420p10le"]
+        if adjust:
+            steps.append(adjust)
     if not same:
         steps.append(f"pad={w}:{h}:(ow-iw)/2:(oh-ih)/2:color=black")
-    steps += ["setsar=1", f"fps={target.fps.numerator}/{target.fps.denominator}", f"format={_pix_fmt(encoder)}"]
+    steps += ["setsar=1", f"format={_pix_fmt(encoder)}"]
     return ",".join(steps)
 
 
