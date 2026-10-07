@@ -185,3 +185,30 @@ def test_no_copy_mode_reads_from_card_and_resumes(card, tmp_path, monkeypatch):
     assert names == ["Занятие 01.10.2026", "Занятие 03.10.2026"], (first, names)
     assert not list(archive.rglob("VID_*.mp4"))
     assert len(list(archive.rglob("video*.mp4"))) == 2
+
+
+def test_interrupted_build_is_released_on_start(card, tmp_path):
+    """Вышли из приложения посреди сборки: день не теряется, временные куски удаляются."""
+    from datetime import date
+
+    from improv_video.state import State
+
+    archive = tmp_path / "Footage"
+    state = State(archive / "state.sqlite")
+    day = date(2026, 10, 1)
+    state.add_clip("VID_20261001_180500_00_578.mp4", 1, day)
+    state.create_video(day, ["VID_20261001_180500_00_578.mp4"])  # «собирается», и приложение закрыли
+    state.close()
+    junk = archive / day.isoformat() / "improv-abc123"
+    junk.mkdir(parents=True)
+    (junk / "rec1_000.mp4").write_bytes(b"x" * 10)
+
+    c = make_controller(tmp_path, FakeUI({}))
+    c.wait_idle()
+    c.submit("forget_skipped")  # любая задача — чтобы рабочий поток точно стартовал
+    c.wait_idle()
+    c.stop()
+    check = State(archive / "state.sqlite")
+    assert check.unassigned_clips(day) == ["VID_20261001_180500_00_578.mp4"]
+    assert check.videos() == []
+    assert not junk.exists()

@@ -141,7 +141,9 @@ class Controller:
         t.start()
 
     def _worker(self) -> None:
-        self.state = State(Path(self.config.archive).expanduser() / "state.sqlite")
+        archive = Path(self.config.archive).expanduser()
+        self.state = State(archive / "state.sqlite")
+        self._recover(archive)
         while True:
             item = self._queue.get()
             if item is None:
@@ -168,6 +170,16 @@ class Controller:
                 self.uploading.clear()
                 with self._lock:
                     self._busy -= 1
+
+    def _recover(self, archive: Path) -> None:
+        """Прошлый запуск оборвался посреди сборки: день соберётся заново, временные куски — в корзину."""
+        days = self.state.release_interrupted()
+        for tmp in archive.glob("*/improv-*"):
+            if tmp.is_dir():
+                shutil.rmtree(tmp, ignore_errors=True)
+        if days:
+            log.info("Прерванная сборка: %s соберётся при следующей вставке флешки",
+                     ", ".join(f"{d:%d.%m.%Y}" for d in days))
 
     def _say(self, title: str, text: str) -> None:
         log.info("%s: %s", title, text)

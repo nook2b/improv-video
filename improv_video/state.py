@@ -145,3 +145,10 @@ class State:
     def failures(self) -> dict[date, str]:
         rows = self.db.execute("SELECT day, reason FROM failures")
         return {date.fromisoformat(r["day"]): r["reason"] for r in rows}
+
+    def release_interrupted(self) -> list[date]:
+        """При запуске: ролики, сборку которых оборвал выход или сбой, снова свободны. Возвращает их дни."""
+        rows = self.db.execute("SELECT id, day FROM videos WHERE status = 'pending'").fetchall()
+        for r in rows:
+            self.release_video(r["id"])
+        return sorted({date.fromisoformat(r["day"]) for r in rows})
