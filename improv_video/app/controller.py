@@ -15,10 +15,11 @@ from datetime import date, datetime
 from functools import partial
 from pathlib import Path
 
-from .. import youtube
-from ..naming import KINDS
-from ..pipeline import (NotEnoughSpace, build_pending, import_card, mark_existing_as_done,
-                        new_clips_on_card, source_folders, upload_ready, video_metadata)
+from .. import tools, youtube
+from ..naming import KINDS, title
+from ..pipeline import (NotEnoughSpace, VideoItem, build_pending, import_card, mark_existing_as_done,
+                        new_clips_on_card, recent_videos, source_folders, upload_ready, video_metadata)
+from ..progress import DayProgress, minutes
 from ..state import State
 from .config import SUPPORT_DIR, AppConfig
 
@@ -26,6 +27,7 @@ log = logging.getLogger("improv-video")
 
 KIND_BY_LABEL = {label: kind for kind, label in KINDS.items()}
 STUDIO_URL = "https://studio.youtube.com"
+IDLE = "Жду флешку"
 RETRY_SECONDS = 30 * 60
 KIND_WAIT_SECONDS = 12 * 3600
 
@@ -38,7 +40,13 @@ class Controller:
         self.ui = ui
         self.tokens = token_store or youtube.KeyringStore()
         self.volumes_dir = volumes_dir
-        self.status = "Жду флешку"
+        self._status = IDLE
+        self.progress: DayProgress | None = None  # сборка дня — для блока прогресса в меню
+        self.uploading: dict[int, float] = {}  # id ролика → доля загрузки
+        self.note: tuple[str, str] | None = None  # «Новых клипов нет» и т. п. до извлечения флешки
+        self.note_volume: Path | None = None
+        self.signed_in = False
+        self._local = threading.local()
         self.manual = []  # последние ролики для ручной загрузки: (название, описание, файл)
         self._queue: queue.Queue = queue.Queue()
         self._threads: list[threading.Thread] = []
@@ -48,7 +56,50 @@ class Controller:
 
     # ---------- запуск и очередь ----------
 
+    # ---------- состояние для меню (читается из основного потока) ----------
+
+    @property
+    def status(self) -> str:
+        if self.progress:
+            return self.progress.summary()
+        if self.uploading:
+            vid, fraction = next(iter(self.uploading.items()))
+            return f"Загрузка на YouTube · {fraction:.0%}"
+        if self._status == IDLE and self.note:
+            return self.note[0]
+        return self._status
+
+    @status.setter
+    def status(self, text: str) -> None:
+        self._status = text
+
+    @property
+    def busy(self) -> bool:
+        return self._status != IDLE or self.progress is not None or bool(self.uploading)
+
+    def videos(self) -> list[VideoItem]:
+        """Список «Ролики»: своё подключение к журналу в потоке меню."""
+        state = getattr(self._local, "state", None)
+        if state is None:
+            state = self._local.state = State(Path(self.config.archive).expanduser() / "state.sqlite")
+        building = None
+        if self.progress and self.progress.day:
+            building = (self.progress.day, self.progress.overall())
+        return recent_videos(state, upload_mode=self.config.upload_mode, uploading=dict(self.uploading),
+                             building=building)
+
+    def stop_processing(self) -> None:
+        """«Остановить обработку»: несобранный день соберётся при следующей вставке флешки."""
+        if self.busy:
+            tools.cancel_all()
+
+    # ---------- запуск и очередь ----------
+
     def start(self, watch: bool = True) -> None:
+        try:
+            self.signed_in = self.tokens.load() is not None
+        except Exception:  # noqa: BLE001 — связка ключей недоступна: считаем, что не вошли
+            self.signed_in = False
         self._spawn(self._worker, daemon=True, track=False)
         if watch:
             self._spawn(self._watch_volumes, daemon=True, track=False)
@@ -89,11 +140,15 @@ class Controller:
             if item is None:
                 return
             task, args = item
+            tools.reset_cancel()
             try:
                 getattr(self, "_do_" + task)(*args)
+            except tools.Cancelled:
+                self._say("improv-video", "Обработка остановлена. День соберётся при следующей вставке флешки.")
             except NotEnoughSpace as e:
                 self._say("Нет места на диске", str(e))
             except youtube.NeedsLogin as e:
+                self.signed_in = False
                 self._say("YouTube", f"{e}: меню improv-video → «Войти в YouTube»")
             except youtube.QuotaExceeded as e:
                 self._say("YouTube", str(e))
@@ -101,7 +156,9 @@ class Controller:
                 log.exception("Ошибка в задаче %s", task)
                 self._say("Ошибка", str(e)[:200])
             finally:
-                self.status = "Жду флешку"
+                self.status = IDLE
+                self.progress = None
+                self.uploading.clear()
                 with self._lock:
                     self._busy -= 1
 
@@ -127,6 +184,8 @@ class Controller:
                 current = {p.name for p in self.volumes_dir.iterdir()} if self.volumes_dir.exists() else set()
             except OSError:
                 current = set()
+            if self.note_volume and self.note_volume.name not in current:
+                self.note, self.note_volume = None, None  # флешку извлекли — подсказка больше не нужна
             for name in sorted(current - seen):
                 path = self.volumes_dir / name
                 try:
@@ -144,8 +203,12 @@ class Controller:
     def _do_source(self, path: Path) -> None:
         """Флешка или папка с клипами."""
         settings = self.config.settings()
+        self.note, self.note_volume = None, None
         clips = new_clips_on_card(path, self.state)
         if not clips and not self.state.days_with_unassigned():
+            self.note = ("Новых клипов нет", "Всё на карте уже обработано. Можно извлечь флешку")
+            self.note_volume = path if path.parent == self.volumes_dir else None
+            self._say("improv-video", "Новых клипов нет")
             return
         if self.state.is_empty():
             days = len({c.start.date() for c in clips})
@@ -164,18 +227,31 @@ class Controller:
                 self._save_config()
                 settings = self.config.settings()
         with self.ui.keep_awake():
-            days = import_card(path, self.state, settings, self._progress)
+            days = import_card(path, self.state, settings, self._progress,
+                               on_copy=lambda f: setattr(self, "status", f"Копирование клипов · {f:.0%}"))
             for day in days:
                 self._spawn(self._ask_kind, day)
             # Новые дни и те, что раньше не собрались (флешку вынули, сбой)
-            for day in sorted(set(days) | set(self.state.days_with_unassigned())):
+            todo = sorted(set(days) | set(self.state.days_with_unassigned()))
+            for n, day in enumerate(todo, 1):
+                kind = self.state.day_kind(day)
+                self.progress = DayProgress(title(kind, day) if kind else f"{day:%d.%m.%Y}", n, len(todo),
+                                            reading_card=not settings.copy_clips, day=day)
                 try:
-                    build_pending(day, self.state, settings, None, self._progress, source=path)
+                    vid = build_pending(day, self.state, settings, None, self._progress, source=path,
+                                        progress=self.progress)
+                    if vid is not None:
+                        row = self.state.video(vid)
+                        name = title(row["kind"], day, row["part"]) if row["kind"] else f"Ролик {day:%d.%m.%Y}"
+                        self._say("improv-video", f"{name} готов за {minutes(self.progress.elapsed())}")
+                except tools.Cancelled:
+                    raise
                 except NotEnoughSpace as e:  # другие дни могут поместиться
                     self._say("Нет места на диске", f"{e}. Освободите место и вставьте флешку заново.")
                 except Exception as e:  # noqa: BLE001 — один день не должен останавливать остальные
                     log.exception("Не собрался день %s", day)
                     self._say("Не удалось собрать", f"{day:%d.%m.%Y}: {str(e)[:150]}. Повторю при следующей вставке флешки.")
+            self.progress = None
             if not settings.copy_clips:
                 self._say("improv-video", "Можно извлечь флешку")
             self._do_deliver()
@@ -206,8 +282,12 @@ class Controller:
             return
         if self.config.upload_mode == "api":
             creds = youtube.credentials(self.tokens)
-            upload_ready(self.state, self.config.settings(),
-                         partial(youtube.upload, creds=creds, privacy="unlisted"), self._progress_upload)
+            try:
+                upload_ready(self.state, self.config.settings(),
+                             partial(youtube.upload, creds=creds, privacy="unlisted"), self._progress_upload,
+                             on_progress=self.uploading.__setitem__)
+            finally:
+                self.uploading.clear()
             return
         for row in ready:
             name, desc, _ = video_metadata(row)
@@ -219,6 +299,19 @@ class Controller:
         self._progress(text)
         if "загружено" in text:
             self.ui.notify("YouTube", text)
+
+    def _do_hand_off_video(self, video_id: int) -> None:
+        """Строка «Загрузить вручную» в списке «Ролики»."""
+        row = self.state.video(video_id)
+        if not row or not row["file"]:
+            return
+        name, desc, _ = video_metadata(row)
+        self.state.update_video(video_id, status="manual")
+        self._spawn(self._hand_off, name, desc, Path(row["file"]))
+
+    def ask_kind(self, day: date) -> None:
+        """Строка «Ждёт выбора типа» в списке «Ролики»."""
+        self._spawn(self._ask_kind, day)
 
     def hand_off(self, name: str, desc: str, file: Path) -> None:
         """Ручная загрузка (из меню): можно повторить для любого из последних роликов."""
@@ -265,7 +358,13 @@ class Controller:
             return
         self.status = "Вход в YouTube: продолжите в браузере"
         youtube.login(secrets, self.tokens)
+        self.signed_in = True
         self._say("YouTube", "Вход сохранён")
+
+    def _do_logout(self) -> None:
+        self.tokens.clear()
+        self.signed_in = False
+        self._say("YouTube", "Вы вышли из YouTube")
 
     def _do_test_upload(self, file: Path) -> None:
         creds = youtube.credentials(self.tokens)

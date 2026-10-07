@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import sqlite3
-from datetime import date
+from datetime import date, datetime
 from pathlib import Path
 
 SCHEMA = """
@@ -24,13 +24,18 @@ CREATE TABLE IF NOT EXISTS videos (
     day        TEXT NOT NULL,
     part       INTEGER NOT NULL,
     kind       TEXT,               -- training | lesson; NULL, пока не выбран
-    status     TEXT NOT NULL,      -- pending | built | uploaded | failed
+    status     TEXT NOT NULL,      -- pending | built | manual | handed | uploaded
     file       TEXT,
     rec_start  TEXT,               -- начало и конец съёмки (местное время камеры, ISO)
     rec_end    TEXT,
     youtube_id TEXT,
     privacy    TEXT,               -- что ответил YouTube: unlisted | private | public
     UNIQUE (day, part)
+);
+CREATE TABLE IF NOT EXISTS failures (
+    day    TEXT PRIMARY KEY,       -- день не собрался; клипы ждут следующей вставки флешки
+    reason TEXT NOT NULL,
+    at     TEXT NOT NULL
 );
 """
 
@@ -126,3 +131,17 @@ class State:
         if status:
             return self.db.execute("SELECT * FROM videos WHERE status = ? ORDER BY day, part", (status,)).fetchall()
         return self.db.execute("SELECT * FROM videos ORDER BY day, part").fetchall()
+
+    def set_failure(self, day: date, reason: str) -> None:
+        with self.db:
+            self.db.execute("INSERT INTO failures (day, reason, at) VALUES (?, ?, ?) "
+                            "ON CONFLICT(day) DO UPDATE SET reason = excluded.reason, at = excluded.at",
+                            (day.isoformat(), reason, datetime.now().isoformat(timespec="seconds")))
+
+    def clear_failure(self, day: date) -> None:
+        with self.db:
+            self.db.execute("DELETE FROM failures WHERE day = ?", (day.isoformat(),))
+
+    def failures(self) -> dict[date, str]:
+        rows = self.db.execute("SELECT day, reason FROM failures")
+        return {date.fromisoformat(r["day"]): r["reason"] for r in rows}

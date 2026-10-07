@@ -157,6 +157,7 @@ def encode_chunk(
     src_size: tuple[int, int] | None = None,
     start_frame: int = 0,
     frames: int | None = None,
+    progress=None,
 ) -> Path:
     """Кодирует кусок записи без звука: кадры [start_frame, start_frame + frames) на сетке target.fps."""
     out = Path(out).resolve()
@@ -177,6 +178,7 @@ def encode_chunk(
             str(out),
         ],
         cwd=work,
+        progress=progress,
     )
     return out
 
@@ -199,12 +201,12 @@ def concat_video(parts: list[Path], out: Path) -> Path:
     return out
 
 
-def mux(segments: list[Path], audio_wav: Path, out: Path) -> Path:
+def mux(segments: list[Path], audio_wav: Path, out: Path, progress=None) -> Path:
     """Склейка закодированных записей без перекодирования + готовый звук в AAC."""
     lst = concat_list(segments, out.with_name(out.stem + "_segments.txt"))
     ffmpeg([
         "-f", "concat", "-safe", "0", "-i", str(lst), "-i", str(audio_wav),
         "-map", "0:v:0", "-map", "1:a:0", "-c:v", "copy", "-tag:v", "hvc1",
         "-c:a", "aac", "-b:a", "192k", "-movflags", "+faststart", str(out),
-    ])
+    ], progress=progress)
     return out

@@ -63,6 +63,45 @@ def test_card_to_manual_upload(card, tmp_path, monkeypatch):
     assert "https://studio.youtube.com" in ui.opened
     assert all(p.name.startswith("video") for p in ui.revealed)
     assert AppConfig.load(tmp_path / "config.json").last_kind in ("lesson", "training")
+    assert any("готов за" in t for _, t in ui.notes)
+    statuses = {it.title: it.status for it in c.videos()}
+    assert statuses == {"Занятие 01.10.2026": "manual", "Тренировка 03.10.2026": "manual"}
+
+
+def test_no_new_clips_note(card, tmp_path):
+    ui = FakeUI({"первый запуск": "Считать обработанными"})
+    c = make_controller(tmp_path, ui)
+    c.submit("source", card)
+    c.wait_idle()
+    c.submit("source", card)  # всё уже обработано
+    c.wait_idle()
+    c.stop()
+    assert ("improv-video", "Новых клипов нет") in ui.notes
+    assert c.status == "Новых клипов нет" and not c.busy
+
+
+def test_stop_processing_keeps_day_for_next_insert(card, tmp_path, monkeypatch):
+    from improv_video import tools
+    import improv_video.pipeline as pl
+
+    monkeypatch.setattr("improv_video.app.config.AppConfig.settings", _fast_settings(AppConfig.settings))
+    ui = FakeUI({"первый запуск": "Обработать все", "Что снимали": "Занятие"})
+    c = make_controller(tmp_path, ui, copy_clips=False)
+    calls = []
+
+    def stopped(*a, **kw):
+        calls.append(a[0])
+        raise tools.Cancelled()
+
+    monkeypatch.setattr(pl, "build_day", stopped)
+    c.submit("source", card)
+    c.wait_idle(300)
+    c.stop()
+    assert len(calls) == 1  # остальные дни после остановки не начинаются
+    assert any("Обработка остановлена" in t for _, t in ui.notes)
+    failed = [it for it in c.videos() if it.status == "failed"]
+    assert len(failed) == 1 and "остановили" in failed[0].detail
+    assert c.manual == []
 
 
 def test_first_run_can_skip(card, tmp_path):

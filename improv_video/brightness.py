@@ -33,7 +33,8 @@ def adjust_filter(profile: str, stops: float) -> str | None:
     return f"lutyuv=y='clip(64+(val-64)*{gain:.4f},minval,maxval)'"
 
 
-def sample_frames(clips: list[Path], out: Path, every: float = 2.0, src_range: str = "tv") -> Path:
+def sample_frames(clips: list[Path], out: Path, every: float = 2.0, src_range: str = "tv",
+                  progress=None) -> Path:
     """Кадр раз в every секунд, 480p, 10 бит без потерь — быстрый материал для замеров.
 
     Декодируются только опорные кадры (-skip_frame nokey): полный декод 4K HEVC медленнее реального времени.
@@ -43,7 +44,7 @@ def sample_frames(clips: list[Path], out: Path, every: float = 2.0, src_range: s
     for fast in (True, False):
         skip = ["-skip_frame", "nokey"] if fast else []
         ffmpeg([*decode_args(), *skip, "-f", "concat", "-safe", "0", "-i", str(lst), "-an",
-                "-vf", vf, "-c:v", "ffv1", str(out)])
+                "-vf", vf, "-c:v", "ffv1", str(out)], progress=progress)
         if _frame_count(out) > 0:
             break
     return out

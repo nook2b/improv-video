@@ -6,7 +6,17 @@ import os
 import shutil
 import subprocess
 import sys
+import tempfile
+import threading
 from pathlib import Path
+from typing import Callable
+
+
+class Cancelled(RuntimeError):
+    """Обработку остановили из меню."""
+
+    def __init__(self):
+        super().__init__("Обработка остановлена")
 
 
 class ToolError(RuntimeError):
@@ -51,21 +61,80 @@ def find_tool(name: str) -> str:
     raise FileNotFoundError(f"Не найдена утилита {name}")
 
 
-def run(tool: str, args: list[str], *, cwd: Path | None = None) -> subprocess.CompletedProcess:
-    """Запускает утилиту; при ошибке бросает ToolError с хвостом stderr."""
+# Остановка: один флаг на всё приложение (задачи идут по одной) и список запущенных процессов.
+_cancel = threading.Event()
+_procs: set[subprocess.Popen] = set()
+_procs_lock = threading.Lock()
+
+
+def cancel_all() -> None:
+    """Останавливает текущую обработку: запущенные утилиты завершаются, новые не стартуют."""
+    _cancel.set()
+    with _procs_lock:
+        for proc in list(_procs):
+            try:
+                proc.kill()
+            except OSError:
+                pass
+
+
+def reset_cancel() -> None:
+    _cancel.clear()
+
+
+def check_cancel() -> None:
+    if _cancel.is_set():
+        raise Cancelled()
+
+
+def _read_progress(stream, progress: Callable[[float], None]) -> None:
+    """Строки ffmpeg -progress: out_time_us=… → секунды обработанного."""
+    for line in stream:
+        key, _, value = line.strip().partition("=")
+        if key in ("out_time_us", "out_time_ms") and value.lstrip("-").isdigit():
+            progress(max(0.0, int(value) / 1_000_000))
+
+
+def run(tool: str, args: list[str], *, cwd: Path | None = None,
+        progress: Callable[[float], None] | None = None) -> subprocess.CompletedProcess:
+    """Запускает утилиту; при ошибке бросает ToolError с хвостом stderr, при остановке — Cancelled.
+
+    progress (только ffmpeg) получает, до какой секунды дошла обработка.
+    """
+    check_cancel()
     cmd = [find_tool(tool), *args]
     if tool in ("ffmpeg", "ffprobe"):
         cmd[1:1] = ["-hide_banner", "-nostdin"] if tool == "ffmpeg" else ["-hide_banner"]
-    proc = subprocess.run(
-        cmd, cwd=cwd, capture_output=True, text=True, encoding="utf-8", errors="replace"
-    )
+    if progress and tool == "ffmpeg":
+        cmd[1:1] = ["-progress", "pipe:1", "-nostats"]
+    with tempfile.TemporaryFile("w+", encoding="utf-8", errors="replace") as err:
+        proc = subprocess.Popen(cmd, cwd=cwd, stdout=subprocess.PIPE, stderr=err, text=True,
+                                encoding="utf-8", errors="replace")
+        with _procs_lock:
+            _procs.add(proc)
+        try:
+            if progress and tool == "ffmpeg":
+                _read_progress(proc.stdout, progress)
+                stdout = ""
+            else:
+                stdout = proc.stdout.read()
+            proc.wait()
+        finally:
+            with _procs_lock:
+                _procs.discard(proc)
+            proc.stdout.close()
+        err.seek(0)
+        stderr = err.read()
+    if _cancel.is_set():
+        raise Cancelled()
     if proc.returncode != 0:
-        raise ToolError(cmd, proc.stderr)
-    return proc
+        raise ToolError(cmd, stderr)
+    return subprocess.CompletedProcess(cmd, proc.returncode, stdout, stderr)
 
 
-def ffmpeg(args: list[str], *, cwd: Path | None = None) -> subprocess.CompletedProcess:
-    return run("ffmpeg", ["-y", *args], cwd=cwd)
+def ffmpeg(args: list[str], *, cwd: Path | None = None,
+           progress: Callable[[float], None] | None = None) -> subprocess.CompletedProcess:
+    return run("ffmpeg", ["-y", *args], cwd=cwd, progress=progress)
 
 
 def concat_list(paths: list[Path], list_file: Path) -> Path:

@@ -12,11 +12,13 @@ from pathlib import Path
 from typing import Callable
 
 from . import audio, autocolor, brightness, lut as lutlib, video
+from .progress import DayProgress, Meter
 from .grouping import Part, Recording, group_days, group_recordings
 from .naming import DEFAULT_DAY_START, description, shooting_day, title
 from .probe import probe
 from .scan import Clip, find_camera_dirs, list_clips
 from .state import State
+from .tools import Cancelled, ToolError
 
 GB = 1024**3
 RESERVE_BYTES = 5 * GB  # macOS нужно немного свободного места для работы
@@ -106,16 +108,33 @@ def mark_existing_as_done(volume: Path, state: State, settings: Settings) -> int
     return len(clips)
 
 
-def _copy_verified(src: Path, dst: Path) -> None:
+COPY_CHUNK = 16 * 1024 * 1024
+
+
+def _copy_verified(src: Path, dst: Path, copied: Callable[[int], None] | None = None) -> None:
+    """Копия через .part с проверкой размера; copied(байт) — для процента, остановка между кусками."""
+    from .tools import check_cancel
+
     tmp = dst.with_name(dst.name + ".part")
-    shutil.copyfile(src, tmp)
+    try:
+        with open(src, "rb") as fin, open(tmp, "wb") as fout:
+            while chunk := fin.read(COPY_CHUNK):
+                check_cancel()
+                fout.write(chunk)
+                if copied:
+                    copied(len(chunk))
+    except BaseException:
+        tmp.unlink(missing_ok=True)
+        raise
+    shutil.copystat(src, tmp)
     if tmp.stat().st_size != src.stat().st_size:
         tmp.unlink(missing_ok=True)
         raise OSError(f"Размер копии не совпал: {src.name}")
     os.replace(tmp, dst)
 
 
-def import_card(volume: Path, state: State, settings: Settings, notify: Notify = print) -> dict[date, list[str]]:
+def import_card(volume: Path, state: State, settings: Settings, notify: Notify = print,
+                on_copy: Callable[[float], None] | None = None) -> dict[date, list[str]]:
     """Регистрирует новые клипы; при copy_clips копирует их в архив/ГГГГ-ММ-ДД/.
 
     Возвращает {день: [имена клипов]}. Без копирования клипы читаются с флешки при сборке.
@@ -136,6 +155,14 @@ def import_card(volume: Path, state: State, settings: Settings, notify: Notify =
     notify(f"Найдено {len(clips)} новых клипов ({clips_bytes / GB:.0f} ГБ, {hours:.1f} ч) за {len(days)} дн."
            + (", копирую…" if settings.copy_clips else ". Не вынимайте флешку до конца обработки"))
     result: dict[date, list[str]] = {}
+    done = 0
+
+    def copied(n: int) -> None:
+        nonlocal done
+        done += n
+        if on_copy:
+            on_copy(done / max(clips_bytes, 1))
+
     for day, recordings in days.items():
         folder = settings.archive / day.isoformat()
         folder.mkdir(exist_ok=True)
@@ -143,7 +170,7 @@ def import_card(volume: Path, state: State, settings: Settings, notify: Notify =
             for part in rec.parts:
                 target = folder / part.clip.name
                 if settings.copy_clips and part.clip.path.resolve() != target.resolve():
-                    _copy_verified(part.clip.path, target)
+                    _copy_verified(part.clip.path, target, copied)
                 state.add_clip(part.clip.name, part.clip.size, day)
                 result.setdefault(day, []).append(part.clip.name)
     if settings.copy_clips:
@@ -166,8 +193,9 @@ def build_day(
     settings: Settings,
     out: Path,
     notify: Notify = print,
+    progress: DayProgress | None = None,
 ) -> BuildResult:
-    """Собирает ролик из клипов одного дня съёмки."""
+    """Собирает ролик из клипов одного дня съёмки; progress — для меню (этапы и проценты)."""
     clips = [Clip(p, p.name, p.stat().st_size, s) for p in clip_paths if (s := _start(p))]
     if not clips:
         raise ValueError("Нет клипов для сборки")
@@ -185,10 +213,14 @@ def build_day(
         all_paths = [p.clip.path for r in recordings for p in r.parts]
         src_range = recordings[0].parts[0].media.color_range
         auto_lut, color_note = None, ""
+        if progress:
+            progress.start("measure")
+        measure = Meter(progress, "measure", total)
         if settings.auto_brightness and settings.lut and settings.profile == "ilog":
             # Автоцвет как «Авто» в Lumetri: одна оценка на день, всё запекается в LUT
             notify("Автоцвет: замер")
-            samples = brightness.sample_frames(all_paths, work / "samples.mkv", max(2.0, total / 600), src_range)
+            samples = brightness.sample_frames(all_paths, work / "samples.mkv", max(2.0, total / 600), src_range,
+                                              progress=measure.track("day"))
             auto_lut, grade = autocolor.solve(samples, settings.lut, work)
             color_note = grade.describe()
             notify("Автоцвет: " + color_note)
@@ -197,14 +229,17 @@ def build_day(
             day_stops = None
             if settings.auto_brightness and settings.brightness_scope == "day":
                 notify("Замер яркости")
-                day_stops = _solve_brightness(all_paths, total, settings, work / "samples.mkv", src_range)
+                day_stops = _solve_brightness(all_paths, total, settings, work / "samples.mkv", src_range,
+                                              measure.track("day"))
             stops_used = []
             for i, rec in enumerate(recordings, 1):
                 if day_stops is not None:
                     stops_used.append(day_stops)
                 elif settings.auto_brightness:
                     stops_used.append(_solve_brightness([p.clip.path for p in rec.parts], rec.duration, settings,
-                                                        work / f"samples{i}.mkv", rec.parts[0].media.color_range))
+                                                        work / f"samples{i}.mkv", rec.parts[0].media.color_range,
+                                                        measure.track(i)))
+                    measure.add(i, rec.duration)
                 else:
                     stops_used.append(0.0)
 
@@ -229,15 +264,19 @@ def build_day(
             lut_file, adjust = color_for(stops_used[i - 1])
             m = rec.parts[0].media
             for j, (start, frames) in enumerate(video.plan_chunks(rec.duration, target.fps, settings.chunk_seconds)):
-                jobs.append((i, j, dict(clips=[p.clip.path for p in rec.parts], out=work / f"rec{i}_{j:03d}.mp4",
+                jobs.append((i, j, frames / float(target.fps), dict(clips=[p.clip.path for p in rec.parts], out=work / f"rec{i}_{j:03d}.mp4",
                                         target=target, encoder=encoder, lut=lut_file, adjust=adjust,
                                         x265_preset=settings.x265_preset, src_range=m.color_range,
                                         src_size=(m.width, m.height), start_frame=start, frames=frames)))
         done = 0
+        if progress:
+            progress.start("encode")
+        encode = Meter(progress, "encode", sum(job[2] for job in jobs))
 
         def run(job):
             nonlocal done
-            path = video.encode_chunk(**job[2])
+            path = video.encode_chunk(**job[3], progress=encode.track((job[0], job[1])))
+            encode.add((job[0], job[1]), job[2])
             done += 1
             notify(f"Кодирование: {done} из {len(jobs)}")
             return path
@@ -246,25 +285,41 @@ def build_day(
         with ThreadPoolExecutor(max_workers=settings.workers or auto_workers()) as pool:
             outputs = list(pool.map(run, jobs))
 
+        if progress:
+            progress.start("audio")
+        # Звук: по шагу на каждый кусок и запись, плюс склейка дня, шумодав и громкость.
+        sound = Meter(progress, "audio", sum(len(r.parts) + 2 for r in recordings) + 3)
+        step = 0
+
+        def stepped(result):
+            nonlocal step
+            step += 1
+            sound.add(step, 1)
+            return result
+
         segments, rec_wavs = [], []
         for i, rec in enumerate(recordings, 1):
-            parts = [o for (ri, _, _), o in zip(jobs, outputs) if ri == i]
+            parts = [o for (ri, _, _, _), o in zip(jobs, outputs) if ri == i]
             seg = video.concat_video(parts, work / f"rec{i}.mp4")
             segments.append(seg)
             # Звук записи: каждый кусок по длине своего видео, затем вся запись — по длине сегмента.
             piece_wavs = [
-                audio.clip_audio(p.clip.path, p.media.duration, p.media.has_audio, work / f"rec{i}_{j}.wav")
+                stepped(audio.clip_audio(p.clip.path, p.media.duration, p.media.has_audio, work / f"rec{i}_{j}.wav"))
                 for j, p in enumerate(rec.parts)
             ]
-            joined = audio.concat(piece_wavs, work / f"rec{i}_joined.wav")
-            rec_wavs.append(audio.fit(joined, probe(seg).duration, work / f"rec{i}.wav"))
+            joined = stepped(audio.concat(piece_wavs, work / f"rec{i}_joined.wav"))
+            rec_wavs.append(stepped(audio.fit(joined, probe(seg).duration, work / f"rec{i}.wav")))
 
         notify("Звук: шумоподавление и громкость")
-        day_wav = audio.concat(rec_wavs, work / "day.wav")
-        clean = audio.denoise(day_wav, work / "day_clean.wav", settings.denoise, settings.rnnoise_model)
-        loud = audio.loudnorm(clean, work / "day_loud.wav")
+        day_wav = stepped(audio.concat(rec_wavs, work / "day.wav"))
+        clean = stepped(audio.denoise(day_wav, work / "day_clean.wav", settings.denoise, settings.rnnoise_model))
+        loud = stepped(audio.loudnorm(clean, work / "day_loud.wav"))
         notify("Склейка")
-        video.mux(segments, loud, out)
+        if progress:
+            progress.start("mux")
+        video.mux(segments, loud, out, progress=Meter(progress, "mux", total).track("mux"))
+        if progress:
+            progress.finish()
 
     return BuildResult(
         file=out,
@@ -280,10 +335,10 @@ def build_day(
 
 
 def _solve_brightness(paths: list[Path], seconds: float, settings: Settings, samples_file: Path,
-                      src_range: str = "tv") -> float:
+                      src_range: str = "tv", progress=None) -> float:
     # Не больше ~600 кадров на замер: раз в 2 с, для длинного дня — реже.
     every = max(2.0, seconds / 600)
-    samples = brightness.sample_frames(paths, samples_file, every, src_range)
+    samples = brightness.sample_frames(paths, samples_file, every, src_range, progress=progress)
     try:
         return brightness.solve(samples, settings.lut, settings.profile, settings.target_luma)
     finally:
@@ -296,8 +351,22 @@ def _start(p: Path) -> datetime | None:
     return parse_start(p.name)
 
 
+def failure_reason(e: BaseException) -> str:
+    """Коротко для меню: почему день не собрался."""
+    if isinstance(e, Cancelled):
+        return "обработку остановили"
+    if isinstance(e, NotEnoughSpace):
+        return "нет места на диске"
+    if isinstance(e, ToolError):
+        return "ошибка обработки видео"
+    if isinstance(e, OSError):
+        return "флешку вынули"
+    return "ошибка, подробности в журнале"
+
+
 def build_pending(day: date, state: State, settings: Settings, kind: str | None = None,
-                  notify: Notify = print, source: Path | None = None) -> int | None:
+                  notify: Notify = print, source: Path | None = None,
+                  progress: DayProgress | None = None) -> int | None:
     """Собирает ролик из ещё не использованных клипов дня (досъёмка → «часть 2»).
 
     Тип (тренировка / занятие) можно выбрать позже: он нужен только для названия при загрузке.
@@ -315,10 +384,12 @@ def build_pending(day: date, state: State, settings: Settings, kind: str | None 
     folder.mkdir(parents=True, exist_ok=True)
     out = folder / ("video.mp4" if part == 1 else f"video_part{part}.mp4")
     try:
-        result = build_day(day, paths, kind or "training", part, settings, out, notify)
-    except Exception:
+        result = build_day(day, paths, kind or "training", part, settings, out, notify, progress)
+    except Exception as e:
         state.release_video(video_id)
+        state.set_failure(day, failure_reason(e))
         raise
+    state.clear_failure(day)
     state.update_video(video_id, status="built", file=str(out),
                        rec_start=result.recorded_at.isoformat(), rec_end=result.recorded_end.isoformat())
     return video_id
@@ -330,15 +401,20 @@ def video_metadata(row) -> tuple[str, str, datetime]:
     return title(row["kind"], date.fromisoformat(row["day"]), row["part"]), description(start, end), start
 
 
-def upload_ready(state: State, settings: Settings, uploader: Callable[..., "object"], notify: Notify = print) -> list[int]:
-    """Загружает собранные ролики с выбранным типом. uploader — youtube.upload с готовым входом."""
+def upload_ready(state: State, settings: Settings, uploader: Callable[..., "object"], notify: Notify = print,
+                 on_progress: Callable[[int, float], None] | None = None) -> list[int]:
+    """Загружает собранные ролики с выбранным типом. uploader — youtube.upload с готовым входом.
+
+    on_progress(id ролика, доля) — для процента в списке «Ролики».
+    """
     done = []
     for row in state.videos("built"):
         if not row["kind"]:
             continue  # ждёт выбора «Тренировка / Занятие»
         name, desc, start = video_metadata(row)
         notify(f"Загружаю «{name}»")
-        result = uploader(Path(row["file"]), name, desc, start)
+        extra = {"progress": lambda f, vid=row["id"]: on_progress(vid, f)} if on_progress else {}
+        result = uploader(Path(row["file"]), name, desc, start, **extra)
         state.update_video(row["id"], status="uploaded", youtube_id=result.video_id, privacy=result.privacy)
         if result.privacy != "unlisted":
             notify(f"«{name}» загружено как {result.privacy}: YouTube ограничил доступ до аудита API — {result.url}")
@@ -346,3 +422,68 @@ def upload_ready(state: State, settings: Settings, uploader: Callable[..., "obje
             notify(f"«{name}» загружено: {result.url}")
         done.append(row["id"])
     return done
+
+
+@dataclass
+class VideoItem:
+    """Строка списка «Ролики» в меню."""
+
+    key: str  # «v<id>» для ролика или «d<день>» для несобранного дня
+    title: str  # «Тренировка 06.10.2026» или «07.10.2026», пока тип не выбран
+    status: str  # building | kind_needed | manual | handed | queued | uploading | uploaded | failed
+    detail: str  # вторая строка: «Ждёт выбора типа · 18:05–20:40», «На YouTube · по ссылке»…
+    day: date
+    video_id: int | None = None
+    fraction: float | None = None  # сборка или загрузка, 0..1
+    url: str | None = None
+
+
+def _span(row) -> str:
+    if not row["rec_start"] or not row["rec_end"]:
+        return ""
+    start, end = datetime.fromisoformat(row["rec_start"]), datetime.fromisoformat(row["rec_end"])
+    return f"{start:%H:%M}–{end:%H:%M}"
+
+
+def recent_videos(state: State, *, upload_mode: str = "manual", uploading: dict[int, float] | None = None,
+                  building: tuple[date, float] | None = None, limit: int = 10) -> list[VideoItem]:
+    """Последние ролики и несобранные дни, новые сверху."""
+    uploading = uploading or {}
+    items: list[VideoItem] = []
+    for row in state.videos():
+        day = date.fromisoformat(row["day"])
+        vid, status = row["id"], row["status"]
+        if status == "pending":
+            continue  # собирается — строку даёт building ниже
+        if row["kind"]:
+            name = title(row["kind"], day, row["part"])
+        else:
+            name = f"{day:%d.%m.%Y}" + (f" (часть {row['part']})" if row["part"] > 1 else "")
+        span = _span(row)
+        if status == "uploaded":
+            where = "по ссылке" if row["privacy"] == "unlisted" else "приватно"
+            items.append(VideoItem(f"v{vid}", name, "uploaded", f"На YouTube · {where}", day, vid,
+                                   url=f"https://youtu.be/{row['youtube_id']}"))
+        elif not row["kind"]:
+            items.append(VideoItem(f"v{vid}", name, "kind_needed",
+                                   "Ждёт выбора типа" + (f" · {span}" if span else ""), day, vid))
+        elif vid in uploading:
+            items.append(VideoItem(f"v{vid}", name, "uploading", f"Загружается · {uploading[vid]:.0%}", day, vid,
+                                   fraction=uploading[vid]))
+        elif status == "handed":
+            items.append(VideoItem(f"v{vid}", name, "handed", "Передан в YouTube Studio", day, vid))
+        elif status == "manual" or (status == "built" and upload_mode == "manual"):
+            items.append(VideoItem(f"v{vid}", name, "manual", "Загрузить вручную", day, vid))
+        else:
+            items.append(VideoItem(f"v{vid}", name, "queued", "Ждёт загрузки на YouTube", day, vid))
+    for day, reason in state.failures().items():
+        if building and building[0] == day:
+            continue
+        items.append(VideoItem(f"d{day.isoformat()}", f"{day:%d.%m.%Y}", "failed", f"Не собрался: {reason}", day))
+    if building:
+        day, fraction = building
+        items.append(VideoItem(f"d{day.isoformat()}", f"{day:%d.%m.%Y}", "building",
+                               f"Собирается · {fraction:.0%}", day, fraction=fraction))
+    order = {"building": 2}  # при сортировке по убыванию собираемый день — первым
+    items.sort(key=lambda it: (it.day, order.get(it.status, 1), it.key), reverse=True)
+    return items[:limit]

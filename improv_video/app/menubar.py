@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import logging
 import threading
-from pathlib import Path
 
 import rumps
 
@@ -30,7 +29,9 @@ class MenuBarApp(rumps.App):
         self.config = AppConfig.load()
         self.controller = Controller(self.config, macos)
         self.status_item = rumps.MenuItem("Жду флешку")
-        self.manual_menu = rumps.MenuItem("Ручная загрузка")
+        self.stop_item = rumps.MenuItem("Остановить обработку")
+        self.videos_menu = rumps.MenuItem("Ролики")
+        self.youtube_item = rumps.MenuItem("Войти в YouTube…", callback=self.toggle_youtube)
         self.denoise_menu = rumps.MenuItem("Шумоподавление")
         for key, label in DENOISE.items():
             self.denoise_menu.add(rumps.MenuItem(label, callback=self._set_denoise(key)))
@@ -45,13 +46,14 @@ class MenuBarApp(rumps.App):
             self.quality_menu.add(rumps.MenuItem(label, callback=self._set_quality(h)))
         self.menu = [
             self.status_item,
+            self.stop_item,
             None,
             rumps.MenuItem("Обработать папку с клипами…", callback=self.process_folder),
-            self.manual_menu,
+            self.videos_menu,
             rumps.MenuItem("Открыть архив", callback=lambda _: macos.open_path(self.config.archive)),
             rumps.MenuItem("Вернуть клипы, отмеченные как обработанные…", callback=self.forget_skipped),
             None,
-            rumps.MenuItem("Войти в YouTube…", callback=lambda _: self.controller.submit("login")),
+            self.youtube_item,
             rumps.MenuItem("Проверить загрузку на YouTube…", callback=self.test_upload),
             self.mode_menu,
             None,
@@ -73,18 +75,43 @@ class MenuBarApp(rumps.App):
     # ---------- обновление меню (основной поток) ----------
 
     def _tick(self, _):
-        busy = self.controller.status != "Жду флешку"
-        self.title = "⏳" if busy else "🎬"
-        self.status_item.title = self.controller.status
-        names = [m[0] for m in self.controller.manual]
-        if names != getattr(self, "_manual_names", None):
-            self._manual_names = names
-            self.manual_menu.clear()
-            if not names:
-                self.manual_menu.add(rumps.MenuItem("Пока нет роликов"))
-            for name, desc, file in self.controller.manual:
-                self.manual_menu.add(rumps.MenuItem(
-                    name, callback=lambda _, n=name, d=desc, f=file: self.controller.hand_off(n, d, f)))
+        c = self.controller
+        progress = c.progress
+        self.title = f"⏳ {progress.overall():.0%}" if progress else ("⏳" if c.busy else "🎬")
+        self.status_item.title = c.status
+        self.stop_item.set_callback(self.stop_processing if c.busy else None)
+        self.youtube_item.title = "Выйти из YouTube" if c.signed_in else "Войти в YouTube…"
+        try:
+            items = c.videos()
+        except Exception:  # noqa: BLE001 — журнал занят или недоступен: покажем в следующую секунду
+            return
+        rows = [(it.key, f"{it.title} — {it.detail}") for it in items]
+        if rows != getattr(self, "_video_rows", None):
+            self._video_rows = rows
+            self.videos_menu.clear()
+            if not items:
+                self.videos_menu.add(rumps.MenuItem("Роликов пока нет"))
+            for it in items:
+                self.videos_menu.add(rumps.MenuItem(f"{it.title} — {it.detail}", callback=self._video_action(it)))
+
+    def _video_action(self, it):
+        """Клик по строке «Ролики» — действие по статусу."""
+        c = self.controller
+        if it.status == "kind_needed":
+            return lambda _: c.ask_kind(it.day)
+        if it.status in ("manual", "handed") and it.video_id:
+            return lambda _: c.submit("hand_off_video", it.video_id)
+        if it.status == "uploaded" and it.url:
+            return lambda _: macos.open_path(it.url)
+        if it.status == "failed":
+            return lambda _: macos.open_path(LOG_FILE)
+        return None
+
+    def stop_processing(self, _):
+        self.controller.stop_processing()
+
+    def toggle_youtube(self, _):
+        self.controller.submit("logout" if self.controller.signed_in else "login")
 
     def _refresh_checks(self):
         for key, label in DENOISE.items():
