@@ -61,6 +61,8 @@ class Controller:
         self._busy = 0
         self._lock = threading.Lock()
         self._stop = threading.Event()
+        self._delivering = False  # идёт выдача роликов (в своём потоке, не в очереди со сборкой)
+        self._deliver_again = False
 
     # ---------- запуск и очередь ----------
 
@@ -153,24 +155,27 @@ class Controller:
             tools.reset_cancel()
             try:
                 getattr(self, "_do_" + task)(*args)
-            except tools.Cancelled:
-                self._say("improv-video", "Обработка остановлена. День соберётся при следующей вставке флешки.")
-            except NotEnoughSpace as e:
-                self._say("Нет места на диске", str(e))
-            except youtube.NeedsLogin as e:
-                self.signed_in = False
-                self._say("YouTube", f"{e}: меню improv-video → «Войти в YouTube»")
-            except youtube.QuotaExceeded as e:
-                self._say("YouTube", str(e))
-            except Exception as e:  # noqa: BLE001 — показываем человеку любую ошибку
-                log.exception("Ошибка в задаче %s", task)
-                self._say("Ошибка", str(e)[:200])
+            except Exception as e:  # noqa: BLE001
+                self._report(task, e)
             finally:
                 self.status = IDLE
                 self.progress = None
-                self.uploading.clear()
                 with self._lock:
                     self._busy -= 1
+
+    def _report(self, task: str, e: Exception) -> None:
+        if isinstance(e, tools.Cancelled):
+            self._say("improv-video", "Обработка остановлена. День соберётся при следующей вставке флешки.")
+        elif isinstance(e, NotEnoughSpace):
+            self._say("Нет места на диске", str(e))
+        elif isinstance(e, youtube.NeedsLogin):
+            self.signed_in = False
+            self._say("YouTube", f"{e}: меню improv-video → «Войти в YouTube»")
+        elif isinstance(e, youtube.QuotaExceeded):
+            self._say("YouTube", str(e))
+        else:  # показываем человеку любую ошибку
+            log.error("Ошибка в задаче %s", task, exc_info=e)
+            self._say("Ошибка", str(e)[:200])
 
     def _recover(self, archive: Path) -> None:
         """Прошлый запуск оборвался посреди сборки: день соберётся заново, временные куски — в корзину."""
@@ -266,6 +271,7 @@ class Controller:
                         row = self.state.video(vid)
                         name = title(row["kind"], day, row["part"]) if row["kind"] else f"Ролик {day:%d.%m.%Y}"
                         self._say("improv-video", f"{name} готов за {minutes(self.progress.elapsed())}")
+                        self.deliver()  # первый ролик можно смотреть, пока собираются остальные
                 except tools.Cancelled:
                     raise
                 except NotEnoughSpace as e:  # другие дни могут поместиться
@@ -276,7 +282,6 @@ class Controller:
             self.progress = None
             if not settings.copy_clips:
                 self._say("improv-video", "Можно извлечь флешку")
-            self._do_deliver()
 
     def _ask_kind(self, day: date, meta: str = "", note: str = "") -> None:
         kind = self.ui.ask_kind(day, meta, note, self.config.last_kind, KIND_WAIT_SECONDS)
@@ -293,7 +298,7 @@ class Controller:
         progress = self.progress
         if progress is not None and progress.day == day:
             progress.label = title(kind, day)
-        self.submit("deliver")
+        self.deliver()
 
     def _do_forget_skipped(self) -> None:
         n = self.state.forget_skipped()
@@ -303,13 +308,39 @@ class Controller:
     # ---------- выдача ролика ----------
 
     def _do_deliver(self) -> None:
-        ready = [r for r in self.state.videos("built") if r["kind"]]
+        self.deliver()
+
+    def deliver(self) -> None:
+        """Выдать готовые ролики (окно «Ролик готов» или загрузка) сразу, в своём потоке:
+        сборка остальных дней с флешки при этом идёт дальше. Одна выдача за раз — без двойной загрузки."""
+        with self._lock:
+            if self._delivering:
+                self._deliver_again = True
+                return
+            self._delivering = True
+        self._spawn(self._deliver_loop)
+
+    def _deliver_loop(self) -> None:
+        while True:
+            try:
+                with self._own_state() as state:
+                    self._deliver_ready(state)
+            except Exception as e:  # noqa: BLE001
+                self._report("deliver", e)
+            with self._lock:
+                if not self._deliver_again:
+                    self._delivering = False
+                    return
+                self._deliver_again = False
+
+    def _deliver_ready(self, state: State) -> None:
+        ready = [r for r in state.videos("built") if r["kind"]]
         if not ready:
             return
         if self.config.upload_mode == "api":
             creds = youtube.credentials(self.tokens)
             try:
-                upload_ready(self.state, self.config.settings(),
+                upload_ready(state, self.config.settings(),
                              partial(youtube.upload, creds=creds, privacy="unlisted"), self._progress_upload,
                              on_progress=self.uploading.__setitem__)
             finally:
@@ -317,7 +348,7 @@ class Controller:
             return
         for row in ready:
             name, desc, _ = video_metadata(row)
-            self.state.update_video(row["id"], status="manual")
+            state.update_video(row["id"], status="manual")
             self.manual = ([(name, desc, Path(row["file"]))] + self.manual)[:10]
             self._spawn(self._hand_off, name, desc, Path(row["file"]), row["id"])
 

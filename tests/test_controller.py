@@ -84,6 +84,33 @@ def test_card_to_manual_upload(card, tmp_path, monkeypatch):
     assert statuses == {"Занятие 01.10.2026": "handed", "Тренировка 03.10.2026": "handed"}
 
 
+def test_first_video_ready_while_next_day_builds(card, tmp_path, monkeypatch):
+    """Ролик первого дня выдаётся сразу, а не после сборки всей флешки."""
+    import time
+
+    import improv_video.pipeline as pl
+
+    monkeypatch.setattr("improv_video.app.config.AppConfig.settings", _fast_settings(AppConfig.settings))
+    ui = FakeUI({"первый запуск": "Обработать все", "Что снимали": "Занятие"})
+    c = make_controller(tmp_path, ui)
+    real, ready_before = pl.build_day, []
+
+    def build(day, *a, **kw):
+        if ready_before == [] and day.day == 3:  # второй день: первый ролик должен уже быть выдан
+            end = time.monotonic() + 30
+            while not ui.ready and time.monotonic() < end:
+                time.sleep(0.05)
+            ready_before.append([n for n, _, _ in ui.ready])
+        return real(day, *a, **kw)
+
+    monkeypatch.setattr(pl, "build_day", build)
+    c.submit("source", card)
+    c.wait_idle(300)
+    c.stop()
+    assert ready_before == [["Занятие 01.10.2026"]]
+    assert sorted(n for n, _, _ in ui.ready) == ["Занятие 01.10.2026", "Занятие 03.10.2026"]
+
+
 def test_no_new_clips_note(card, tmp_path):
     ui = FakeUI({"первый запуск": "Считать обработанными"})
     c = make_controller(tmp_path, ui)
