@@ -1,10 +1,9 @@
 name: calibrate
 
-# Запуск: записать ID файла Google Drive (доступ по ссылке) в calibration/drive_id.txt и запушить.
+# Только вручную (Actions → calibrate → Run workflow): репозиторий публичный, а кадры
+# и превью клипа в артефактах видны всем. ID файла Google Drive — в calibration/drive_id.txt.
 on:
-  push:
-    paths: ["calibration/drive_id.txt", "tools/calibrate.py", ".github/workflows/calibrate.yml",
-            "improv_video/autocolor.py"]
+  workflow_dispatch:
 
 jobs:
   calibrate:
