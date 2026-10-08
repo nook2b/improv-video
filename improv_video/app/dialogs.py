@@ -36,6 +36,7 @@ from AppKit import (
 )
 from PyObjCTools import AppHelper
 
+from ..naming import KINDS
 from .views import _rgba, color, draw_icon, draw_line, draw_wrapped, fill_round, font, is_dark, render_png, text_width
 
 # Цвета окон, которых нет в меню (tokens/colors.css)
@@ -250,7 +251,7 @@ class KindInfo:
     default: str = "training"  # как в прошлый раз
 
 
-KIND_LABELS = {"training": "Тренировка", "lesson": "Занятие"}
+KIND_LABELS = KINDS
 
 
 def kind_painter(info: KindInfo):
@@ -275,11 +276,12 @@ def kind_painter(info: KindInfo):
             y += 12
         y += 16
         card_w = (w - 10) / 2
-        for i, kind in enumerate(("training", "lesson")):
-            cx = x0 + i * (card_w + 10)
+        for i, kind in enumerate(KINDS):  # по два в ряд
+            cx, cy = x0 + i % 2 * (card_w + 10), y + i // 2 * (88 + 10)
             if draw:
-                _kind_card(c, kind, kind == info.default, cx, y, card_w, info, dark)
-        y += 88 + 16
+                _kind_card(c, kind, kind == info.default, cx, cy, card_w, info, dark)
+        rows = (len(KINDS) + 1) // 2
+        y += rows * 88 + (rows - 1) * 10 + 16
         y += draw_wrapped("Ролик собирается уже сейчас. Ответить можно и позже — из меню «Ролики».",
                           x0, y, w, font(12), color("text-tertiary", dark), draw)
         return y + 18
@@ -306,14 +308,14 @@ def _kind_card(c, kind, chosen, x, y, w, info, dark) -> None:
 
 def build_kind(info: KindInfo, answer):
     canvas = Canvas.alloc().initWithFrame_(NSMakeRect(0, 0, 420, 300))
-    keys = {"training": "training", "lesson": "lesson", "later": None}
+    keys = {**{k: k for k in KINDS}, "later": None}
     canvas.setup(kind_painter(info), lambda k: answer(keys[k]),
                  lambda k: answer(info.default if k == "return" else None), WINDOW)
     return _window(420, canvas)
 
 
 def ask_kind(info: KindInfo, timeout: float | None = None) -> str | None:
-    """training | lesson | None (закрыли — ответить позже)."""
+    """Ключ из KINDS или None (закрыли — ответить позже)."""
     return _ask(lambda answer: build_kind(info, answer), timeout)
 
 

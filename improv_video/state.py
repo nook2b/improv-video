@@ -17,19 +17,20 @@ CREATE TABLE IF NOT EXISTS clips (
 );
 CREATE TABLE IF NOT EXISTS days (
     day  TEXT PRIMARY KEY,
-    kind TEXT                      -- training | lesson: ответ на «Что снимали?» хранится за днём
+    kind TEXT                      -- training | lesson | show | masterclass: ответ на «Что снимали?» хранится за днём
 );
 CREATE TABLE IF NOT EXISTS videos (
     id         INTEGER PRIMARY KEY AUTOINCREMENT,
     day        TEXT NOT NULL,
     part       INTEGER NOT NULL,
-    kind       TEXT,               -- training | lesson; NULL, пока не выбран
+    kind       TEXT,               -- training | lesson | show | masterclass; NULL, пока не выбран
     status     TEXT NOT NULL,      -- pending | built | manual | handed | uploaded
     file       TEXT,
     rec_start  TEXT,               -- начало и конец съёмки (местное время камеры, ISO)
     rec_end    TEXT,
     youtube_id TEXT,
     privacy    TEXT,               -- что ответил YouTube: unlisted | private | public
+    done_at    TEXT,               -- когда передан в Studio или загружен: от него считается автоудаление
     UNIQUE (day, part)
 );
 CREATE TABLE IF NOT EXISTS failures (
@@ -46,6 +47,16 @@ class State:
         self.db = sqlite3.connect(str(path))
         self.db.row_factory = sqlite3.Row
         self.db.executescript(SCHEMA)
+        self._migrate()
+
+    def _migrate(self) -> None:
+        cols = {r[1] for r in self.db.execute("PRAGMA table_info(videos)")}
+        if "done_at" not in cols:
+            # Ролики, переданные до появления автоудаления, считаются переданными сейчас
+            with self.db:
+                self.db.execute("ALTER TABLE videos ADD COLUMN done_at TEXT")
+                self.db.execute("UPDATE videos SET done_at = ? WHERE status IN ('handed', 'uploaded')",
+                                (datetime.now().isoformat(timespec="seconds"),))
 
     def close(self) -> None:
         self.db.close()
@@ -119,7 +130,7 @@ class State:
         return video_id, part
 
     def update_video(self, video_id: int, **fields) -> None:
-        allowed = {"kind", "status", "file", "rec_start", "rec_end", "youtube_id", "privacy"}
+        allowed = {"kind", "status", "file", "rec_start", "rec_end", "youtube_id", "privacy", "done_at"}
         if not fields or set(fields) - allowed:
             raise ValueError(f"Недопустимые поля: {set(fields) - allowed}")
         cols = ", ".join(f"{k} = ?" for k in fields)
@@ -133,6 +144,13 @@ class State:
         if status:
             return self.db.execute("SELECT * FROM videos WHERE status = ? ORDER BY day, part", (status,)).fetchall()
         return self.db.execute("SELECT * FROM videos ORDER BY day, part").fetchall()
+
+    def done_before(self, moment: datetime) -> list[sqlite3.Row]:
+        """Переданные в Studio или загруженные не позже moment, чей файл ещё на диске."""
+        return self.db.execute(
+            "SELECT * FROM videos WHERE status IN ('handed', 'uploaded') AND file IS NOT NULL AND file != '' "
+            "AND done_at IS NOT NULL AND done_at <= ? ORDER BY day, part",
+            (moment.isoformat(timespec="seconds"),)).fetchall()
 
     def set_failure(self, day: date, reason: str) -> None:
         with self.db:

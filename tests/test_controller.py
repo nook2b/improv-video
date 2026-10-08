@@ -27,7 +27,9 @@ class FakeUI:
 
     def ask_kind(self, day, meta="", note="", default="training", timeout=None):
         answer = self.dialog(f"Что снимали {day:%d.%m.%Y}? {meta}", [])
-        return {"Тренировка": "training", "Занятие": "lesson"}.get(answer)
+        from improv_video.naming import KINDS
+
+        return {label: key for key, label in KINDS.items()}.get(answer)
 
     def show_ready(self, name, desc, file):
         with self.lock:
@@ -35,6 +37,10 @@ class FakeUI:
 
     def notify(self, title, text):
         self.notes.append((title, text))
+
+    def trash(self, path):
+        Path(path).unlink()
+        self.trashed = getattr(self, "trashed", []) + [Path(path)]
 
     def choose_file(self, prompt, extensions=None):
         return None
@@ -273,3 +279,30 @@ def test_menu_actions_work_while_card_is_processing(card, tmp_path, monkeypatch)
     c.wait_idle(60)
     c.stop()
     assert State(tmp_path / "Footage" / "state.sqlite").video(vid)["status"] == "handed"
+
+
+def test_handed_video_goes_to_trash_after_days(card, tmp_path, monkeypatch):
+    from datetime import datetime, timedelta
+
+    from improv_video.state import State
+
+    monkeypatch.setattr("improv_video.app.config.AppConfig.settings", _fast_settings(AppConfig.settings))
+    ui = FakeUI({"первый запуск": "Обработать все", "Что снимали": "Шоу"})
+    c = make_controller(tmp_path, ui, delete_after_days=3)
+    c.submit("source", card)
+    c.wait_idle(300)
+    c.cleanup()
+    assert not getattr(ui, "trashed", [])  # «Готово» только что — рано
+
+    state = State(tmp_path / "Footage" / "state.sqlite")
+    old = (datetime.now() - timedelta(days=4)).isoformat(timespec="seconds")
+    rows = state.videos("handed")
+    assert rows and all(r["done_at"] for r in rows)
+    state.update_video(rows[0]["id"], done_at=old)
+    c.cleanup()
+    c.stop()
+    assert ui.trashed == [Path(rows[0]["file"])] and not ui.trashed[0].exists()
+    assert state.video(rows[0]["id"])["file"] is None
+    assert any("В Корзину: Шоу" in t for _, t in ui.notes)
+    detail = {it.video_id: it.detail for it in c.videos()}
+    assert detail[rows[0]["id"]] == "Передан в YouTube Studio · файл в Корзине"

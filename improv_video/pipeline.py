@@ -468,18 +468,38 @@ def upload_ready(state: State, settings: Settings, uploader: Callable[..., "obje
     done = []
     for row in state.videos("built"):
         if not row["kind"]:
-            continue  # ждёт выбора «Тренировка / Занятие»
+            continue  # ждёт ответа на «Что снимали?»
         name, desc, start = video_metadata(row)
         notify(f"Загружаю «{name}»")
         extra = {"progress": lambda f, vid=row["id"]: on_progress(vid, f)} if on_progress else {}
         result = uploader(Path(row["file"]), name, desc, start, **extra)
-        state.update_video(row["id"], status="uploaded", youtube_id=result.video_id, privacy=result.privacy)
+        state.update_video(row["id"], status="uploaded", youtube_id=result.video_id, privacy=result.privacy,
+                           done_at=datetime.now().isoformat(timespec="seconds"))
         if result.privacy != "unlisted":
             notify(f"«{name}» загружено как {result.privacy}: YouTube ограничил доступ до аудита API — {result.url}")
         else:
             notify(f"«{name}» загружено: {result.url}")
         done.append(row["id"])
     return done
+
+
+def trash_done_videos(state: State, days: int, trash: Callable[[Path], None],
+                      now: datetime | None = None) -> list[str]:
+    """Файлы роликов, переданных в Studio или загруженных days дней назад и раньше, — в Корзину.
+    Возвращает названия; days <= 0 — автоудаление выключено."""
+    if days <= 0:
+        return []
+    from datetime import timedelta
+
+    moved = []
+    for row in state.done_before((now or datetime.now()) - timedelta(days=days)):
+        path = Path(row["file"])
+        if path.exists():
+            trash(path)
+        state.update_video(row["id"], file=None)
+        moved.append(title(row["kind"], date.fromisoformat(row["day"]), row["part"]) if row["kind"]
+                     else path.name)
+    return moved
 
 
 @dataclass
@@ -518,9 +538,10 @@ def recent_videos(state: State, *, upload_mode: str = "manual", uploading: dict[
         else:
             name = f"{day:%d.%m.%Y}" + (f" (часть {row['part']})" if row["part"] > 1 else "")
         span = _span(row)
+        gone = " · файл в Корзине" if status in ("handed", "uploaded") and not row["file"] else ""
         if status == "uploaded":
             where = "по ссылке" if row["privacy"] == "unlisted" else "приватно"
-            items.append(VideoItem(f"v{vid}", name, "uploaded", f"На YouTube · {where}", day, vid,
+            items.append(VideoItem(f"v{vid}", name, "uploaded", f"На YouTube · {where}{gone}", day, vid,
                                    url=f"https://youtu.be/{row['youtube_id']}"))
         elif not row["kind"]:
             items.append(VideoItem(f"v{vid}", name, "kind_needed",
@@ -529,7 +550,7 @@ def recent_videos(state: State, *, upload_mode: str = "manual", uploading: dict[
             items.append(VideoItem(f"v{vid}", name, "uploading", f"Загружается · {uploading[vid]:.0%}", day, vid,
                                    fraction=uploading[vid]))
         elif status == "handed":
-            items.append(VideoItem(f"v{vid}", name, "handed", "Передан в YouTube Studio", day, vid))
+            items.append(VideoItem(f"v{vid}", name, "handed", "Передан в YouTube Studio" + gone, day, vid))
         elif status == "manual" or (status == "built" and upload_mode == "manual"):
             items.append(VideoItem(f"v{vid}", name, "manual", "Загрузить вручную", day, vid))
         else:

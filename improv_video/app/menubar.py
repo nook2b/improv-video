@@ -41,6 +41,9 @@ from .controller import Controller
 TAB = 236  # где кончаются значения справа («1080p», «не вошли») перед стрелкой подменю
 
 
+DELETE_CHOICES = {0: "Не удалять", 1: "Через день", 3: "Через 3 дня", 7: "Через неделю"}
+
+
 def _in_thread(fn):
     def run(*args):
         threading.Thread(target=fn, args=args, daemon=True).start()
@@ -207,6 +210,14 @@ class MenuBarApp(rumps.App):
         m.add(rumps.MenuItem("Вернуть клипы, отмеченные как обработанные…", callback=self.forget_skipped))
         m.add(rumps.MenuItem("Открыть журнал", callback=lambda _: macos.open_path(LOG_FILE)))
         m.add(rumps.separator)
+        self.delete_menu = rumps.MenuItem("Удалять ролики после загрузки")
+        self.delete_items = {}
+        for days, label in DELETE_CHOICES.items():
+            item = rumps.MenuItem(label, callback=self._set_delete_days(days))
+            self.delete_menu.add(item)
+            self.delete_items[days] = item
+        _raw(self.delete_menu, _note("Файл — в Корзину; дни от «Готово» или загрузки"))
+        m.add(self.delete_menu)
         self.auto_update_item = rumps.MenuItem("Обновлять автоматически", callback=self.toggle_auto_update)
         m.add(self.auto_update_item)
         m.add(rumps.MenuItem("Проверить обновления", callback=self.check_updates))
@@ -244,6 +255,10 @@ class MenuBarApp(rumps.App):
         _set_title(self.archive_item, "Папка архива:", mm.ellipsize_middle(archive, 30) + "…")
         self.login_at_start.state = int(macos.launch_at_login_enabled())
         self.auto_update_item.state = int(cfg.auto_update)
+        for days, item in self.delete_items.items():
+            item.state = int(cfg.delete_after_days == days)
+        _set_title(self.delete_menu, "Удалять ролики после загрузки",
+                   DELETE_CHOICES.get(cfg.delete_after_days, f"через {cfg.delete_after_days} дн.").lower())
 
     # ---------- обновление раз в секунду ----------
 
@@ -427,6 +442,13 @@ class MenuBarApp(rumps.App):
         logging.getLogger("improv-video").info("Обновление до %s: перезапуск", version)
         updater.launch_swap(app, bundle, SUPPORT_DIR / "update", os.getpid())
         rumps.quit_application()
+
+    def _set_delete_days(self, days: int):
+        def cb(_):
+            self.config.delete_after_days = days
+            self._changed()
+            self.controller.cleanup()
+        return cb
 
     def toggle_auto_update(self, _):
         self.config.auto_update = not self.config.auto_update

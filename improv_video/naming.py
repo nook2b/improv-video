@@ -10,7 +10,7 @@ FILENAME_RE = re.compile(r"^VID_(\d{8})_(\d{6})", re.IGNORECASE)
 
 DEFAULT_DAY_START = time(4, 0)
 
-KINDS = {"training": "Тренировка", "lesson": "Занятие"}
+KINDS = {"training": "Тренировка", "lesson": "Занятие", "show": "Шоу", "masterclass": "Мастер-класс"}
 
 
 def parse_start(filename: str) -> datetime | None:

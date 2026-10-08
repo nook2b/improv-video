@@ -18,7 +18,7 @@ from pathlib import Path
 
 from .. import tools, youtube
 from ..naming import KINDS, title
-from ..pipeline import (NotEnoughSpace, VideoItem, build_pending, import_card, mark_existing_as_done,
+from ..pipeline import (NotEnoughSpace, VideoItem, build_pending, trash_done_videos, import_card, mark_existing_as_done,
                         new_clips_on_card, recent_videos, source_folders, upload_ready, video_metadata)
 from ..progress import DayProgress, minutes
 
@@ -226,8 +226,24 @@ class Controller:
             self._stop.wait(5)
 
     def _retry_timer(self) -> None:
+        self.cleanup()
         while not self._stop.wait(RETRY_SECONDS):
             self.submit("deliver")
+            self.cleanup()
+
+    def cleanup(self) -> None:
+        """Автоудаление: файлы переданных и загруженных роликов — в Корзину через N дней."""
+        try:
+            with self._own_state() as state:
+                moved = trash_done_videos(state, self.config.delete_after_days, self.ui.trash)
+        except Exception:  # noqa: BLE001 — не удалось сейчас, попробуем через полчаса
+            log.exception("Автоудаление роликов")
+            return
+        for name in moved:
+            log.info("В Корзину (прошло %s дн. после загрузки): %s", self.config.delete_after_days, name)
+        if moved:
+            self.ui.notify("improv-video", f"В Корзину: {', '.join(moved)}" if len(moved) < 3
+                           else f"В Корзину: {len(moved)} роликов, уже загруженных на YouTube")
 
     def _do_source(self, path: Path) -> None:
         """Флешка или папка с клипами."""
@@ -385,7 +401,7 @@ class Controller:
         with self._own_state() as state:
             row = state.video(video_id)
             if row and row["status"] == "manual":
-                state.update_video(video_id, status="handed")
+                state.update_video(video_id, status="handed", done_at=datetime.now().isoformat(timespec="seconds"))
 
     def ask_kind(self, day: date, meta: str = "") -> None:
         """Строка «Ждёт выбора типа» в списке «Ролики»."""

@@ -28,6 +28,16 @@ def osascript(script: str, timeout: float | None = None) -> str | None:
     return proc.stdout.strip()
 
 
+def trash(path: Path) -> None:
+    """В Корзину (можно вернуть), а не удаление насовсем."""
+    from Foundation import NSURL, NSFileManager
+
+    ok, _, error = NSFileManager.defaultManager().trashItemAtURL_resultingItemURL_error_(
+        NSURL.fileURLWithPath_(str(path)), None, None)
+    if not ok:
+        raise OSError(f"Не удалось переместить в Корзину {path}: {error}")
+
+
 def notify(title: str, text: str) -> None:
     osascript(f"display notification {_q(text)} with title {_q(title)}")
 
