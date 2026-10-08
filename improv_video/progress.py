@@ -91,10 +91,24 @@ class DayProgress:
         return self.clock() - self._t0
 
     def eta_seconds(self) -> float | None:
+        """Оценка по скорости текущего этапа: сколько он ещё займёт плюс остальные этапы по их долям.
+
+        Не по общему проценту: замер теперь идёт минуту, а весит 15% — по общему проценту
+        оценка в начале кодирования выходила вдвое меньше и потом всё росла.
+        """
         done, spent = self.overall(), self.elapsed()
         if done < 0.02 or spent < MIN_ETA_SECONDS or done >= 1:
             return None
-        return spent / done * (1 - done)
+        now = self.clock()
+        with self._lock:
+            stage = self._stage
+            f = self._fractions.get(stage, 0.0) if stage else 0.0
+            ran = now - self._started[stage] if stage else 0.0
+            pending = sum(w for k, (_, w) in STAGES.items() if k != stage and k not in self._finished)
+        if stage is None or f < 0.02 or ran < MIN_ETA_SECONDS:
+            return spent / done * (1 - done)
+        stage_total = ran / f
+        return stage_total * (1 - f) + stage_total * pending / STAGES[stage][1]
 
     def stalled_for(self) -> float:
         """Сколько секунд прогресс не двигался (0, если двигался недавно)."""

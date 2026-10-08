@@ -99,7 +99,9 @@ def main(argv: list[str]) -> int:
                 for p in procs:
                     p.wait()
                 print(f"{best[0]} × {n} параллельно: {n * FRAMES / (time.monotonic() - t0):.1f} к/с суммарно", flush=True)
-        # Полная сборка: 20 с 4K I-Log полного диапазона, куски по 5 с, параллельно
+        # Полная сборка: 20 с 4K I-Log полного диапазона, куски по 5 с, параллельно.
+        # Опорный кадр раз в секунду, как у камеры: иначе прыжки к кадрам автоцвета
+        # (и к началу кусков) расшифровывают по 8 с видео и сборка выглядит медленнее, чем есть.
         from datetime import date
 
         from .pipeline import Settings, auto_workers, build_day
@@ -107,7 +109,7 @@ def main(argv: list[str]) -> int:
         day_clip = work / "VID_20261001_180000_00_001.mp4"
         ffmpeg(["-f", "lavfi", "-i", "testsrc2=s=3840x2160:r=30000/1001:d=20", "-f", "lavfi",
                 "-i", "sine=f=300:d=20:sample_rate=48000", "-vf", "scale=out_range=pc", "-pix_fmt", "yuvj420p",
-                "-c:v", "libx265", "-preset", "ultrafast", "-x265-params", "log-level=error",
+                "-c:v", "libx265", "-preset", "ultrafast", "-x265-params", "log-level=error:keyint=30",
                 "-c:a", "aac", "-ac", "2", str(day_clip)])
         for height, workers in ((2160, 1), (2160, auto_workers()), (1080, auto_workers())):
             settings = Settings(archive=work, lut=work / "lut.cube", profile="ilog", denoise="medium",
@@ -115,7 +117,7 @@ def main(argv: list[str]) -> int:
                                 chunk_seconds=5, max_height=height)
             t0 = time.monotonic()
             r = build_day(date(2026, 10, 1), [day_clip], "training", 1, settings,
-                          work / f"day{height}_{workers}.mp4", notify=lambda _: None)
+                          work / f"day{height}_{workers}.mp4", notify=lambda m: m.startswith("Время") and print("  " + m))
             dt = time.monotonic() - t0
             frames = 20 * 30000 / 1001
             print(f"полная сборка {height}p ({workers} процесс.): {frames / dt:.1f} к/с, "

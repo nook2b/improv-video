@@ -9,6 +9,7 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from datetime import date, datetime, time
 from pathlib import Path
+from time import monotonic
 from typing import Callable
 
 from . import audio, autocolor, brightness, lut as lutlib, video
@@ -219,6 +220,7 @@ def build_day(
         all_paths = [p.clip.path for r in recordings for p in r.parts]
         src_range = recordings[0].parts[0].media.color_range
         auto_lut, color_note = None, ""
+        marks = [("замер", monotonic())]  # начала этапов — итог по времени в журнал
         if progress:
             progress.start("measure")
         measure = Meter(progress, "measure", total)
@@ -275,22 +277,27 @@ def build_day(
                                         x265_preset=settings.x265_preset, src_range=m.color_range,
                                         src_size=(m.width, m.height), start_frame=start, frames=frames)))
         done = 0
+        marks.append(("кодирование", monotonic()))
         if progress:
             progress.start("encode")
         encode = Meter(progress, "encode", sum(job[2] for job in jobs))
 
         def run(job):
             nonlocal done
+            t0 = monotonic()
             path = video.encode_chunk(**job[3], progress=encode.track((job[0], job[1])))
             encode.add((job[0], job[1]), job[2])
             done += 1
-            notify(f"Кодирование: {done} из {len(jobs)}")
+            dt = monotonic() - t0
+            notify(f"Кодирование: {done} из {len(jobs)} (кусок {_mmss(job[2])} за {_mmss(dt)}, "
+                   f"×{job[2] / max(dt, 1e-3):.1f})")
             return path
 
         notify(f"Кодирование: 0 из {len(jobs)}")
         with ThreadPoolExecutor(max_workers=settings.workers or auto_workers()) as pool:
             outputs = list(pool.map(run, jobs))
 
+        marks.append(("звук", monotonic()))
         if progress:
             progress.start("audio")
         # Звук: по шагу на каждый кусок и запись, плюс склейка дня, шумодав и громкость.
@@ -321,11 +328,16 @@ def build_day(
         clean = stepped(audio.denoise(day_wav, work / "day_clean.wav", settings.denoise, settings.rnnoise_model))
         loud = stepped(audio.loudnorm(clean, work / "day_loud.wav"))
         notify("Склейка")
+        marks.append(("склейка", monotonic()))
         if progress:
             progress.start("mux")
         video.mux(segments, loud, out, progress=Meter(progress, "mux", total).track("mux"))
         if progress:
             progress.finish()
+        marks.append(("", monotonic()))
+        spent = marks[-1][1] - marks[0][1]
+        notify(f"Время: {_mmss(total)} видео за {_mmss(spent)} (×{total / max(spent, 1e-3):.1f}); "
+               + ", ".join(f"{name} {_mmss(b - a)}" for (name, a), (_, b) in zip(marks, marks[1:])))
 
     return BuildResult(
         file=out,
@@ -349,6 +361,11 @@ def _solve_brightness(paths: list[Path], seconds: float, settings: Settings, sam
         return brightness.solve(samples, settings.lut, settings.profile, settings.target_luma)
     finally:
         samples.unlink(missing_ok=True)
+
+
+def _mmss(seconds: float) -> str:
+    s = round(seconds)
+    return f"{s // 3600}:{s // 60 % 60:02d}:{s % 60:02d}" if s >= 3600 else f"{s // 60}:{s % 60:02d}"
 
 
 def _start(p: Path) -> datetime | None:

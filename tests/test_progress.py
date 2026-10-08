@@ -31,7 +31,8 @@ def test_stages_overall_eta_and_stall():
     a(20)
     b(30)  # два куска параллельно: 50 из 100 секунд
     assert p.overall() == pytest.approx(0.15 + 0.70 * 0.5)
-    assert p.eta_seconds() == pytest.approx(120 / 0.5 * 0.5)
+    # кодирование: половина за 60 с → ещё 60 с, плюс звук и склейка: (0.10 + 0.05) / 0.70 от 120 с
+    assert p.eta_seconds() == pytest.approx(60 + 120 * 0.15 / 0.70)
     stages = {s.key: s for s in p.stages()}
     assert stages["measure"].state == "done" and stages["measure"].seconds == 60
     assert stages["encode"].state == "active" and stages["encode"].fraction == pytest.approx(0.5)
