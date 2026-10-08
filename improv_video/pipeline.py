@@ -13,7 +13,7 @@ from time import monotonic
 from typing import Callable
 
 from . import audio, autocolor, brightness, lut as lutlib, video
-from .progress import DayProgress, Meter
+from .progress import DayProgress, Meter, StallWatch
 from .grouping import Part, Recording, group_days, group_recordings
 from .naming import DEFAULT_DAY_START, description, shooting_day, title
 from .probe import probe
@@ -285,8 +285,14 @@ def build_day(
         def run(job):
             nonlocal done
             t0 = monotonic()
-            path = video.encode_chunk(**job[3], progress=encode.track((job[0], job[1])))
-            encode.add((job[0], job[1]), job[2])
+            key = (job[0], job[1])
+            start = job[3]["start_frame"] / float(target.fps)
+            stats = encode.watch(key, f"запись {job[0]} с {_mmss(start)}")
+            try:
+                path = video.encode_chunk(**job[3], progress=encode.track(key), stats=stats)
+            finally:
+                encode.forget(key)
+            encode.add(key, job[2])
             done += 1
             dt = monotonic() - t0
             notify(f"Кодирование: {done} из {len(jobs)} (кусок {_mmss(job[2])} за {_mmss(dt)}, "
@@ -294,7 +300,8 @@ def build_day(
             return path
 
         notify(f"Кодирование: 0 из {len(jobs)}")
-        with ThreadPoolExecutor(max_workers=settings.workers or auto_workers()) as pool:
+        with StallWatch(encode, notify, lambda: read_check(all_paths)), \
+                ThreadPoolExecutor(max_workers=settings.workers or auto_workers()) as pool:
             outputs = list(pool.map(run, jobs))
 
         marks.append(("звук", monotonic()))
@@ -361,6 +368,34 @@ def _solve_brightness(paths: list[Path], seconds: float, settings: Settings, sam
         return brightness.solve(samples, settings.lut, settings.profile, settings.target_luma)
     finally:
         samples.unlink(missing_ok=True)
+
+
+def read_check(paths: list[Path], size: int = 8 << 20, timeout: float = 20.0) -> str:
+    """Насколько быстро сейчас читается источник: 8 МБ из случайного места самого длинного клипа
+    (каждый раз другого — иначе ответит кэш Mac, а не флешка)."""
+    import random
+    import threading
+
+    path = max(paths, key=lambda p: p.stat().st_size if p.exists() else -1, default=None)
+    if path is None or not path.exists():
+        return "клипы недоступны — флешка отключена?"
+    result: list[float] = []
+
+    def read():
+        t0 = monotonic()
+        with open(path, "rb", buffering=0) as f:
+            f.seek(random.randrange(max(1, path.stat().st_size - size)))
+            got = 0
+            while got < size and (chunk := f.read(1 << 20)):
+                got += len(chunk)
+        result.append(monotonic() - t0)
+
+    t = threading.Thread(target=read, daemon=True)
+    t.start()
+    t.join(timeout)
+    if not result:
+        return f"чтение {size >> 20} МБ с источника не закончилось за {timeout:.0f} с"
+    return f"источник: {size >> 20} МБ за {result[0]:.1f} с ({size / (1 << 20) / max(result[0], 1e-3):.0f} МБ/с)"
 
 
 def _mmss(seconds: float) -> str:

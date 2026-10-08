@@ -159,6 +159,7 @@ def encode_chunk(
     start_frame: int = 0,
     frames: int | None = None,
     progress=None,
+    stats=None,
 ) -> Path:
     """Кодирует кусок записи без звука: кадры [start_frame, start_frame + frames) на сетке target.fps."""
     out = Path(out).resolve()
@@ -180,6 +181,7 @@ def encode_chunk(
         ],
         cwd=work,
         progress=progress,
+        stats=stats,
     )
     return out
 

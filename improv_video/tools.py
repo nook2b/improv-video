@@ -87,16 +87,24 @@ def check_cancel() -> None:
         raise Cancelled()
 
 
-def _read_progress(stream, progress: Callable[[float], None]) -> None:
-    """Строки ffmpeg -progress: out_time_us=… → секунды обработанного."""
+def _read_progress(stream, progress: Callable[[float], None],
+                   stats: Callable[[dict], None] | None = None) -> None:
+    """Строки ffmpeg -progress: out_time_us=… → секунды обработанного; stats — весь блок (frame, fps, speed…)."""
+    block: dict[str, str] = {}
     for line in stream:
         key, _, value = line.strip().partition("=")
+        block[key] = value
         if key in ("out_time_us", "out_time_ms") and value.lstrip("-").isdigit():
             progress(max(0.0, int(value) / 1_000_000))
+        if key == "progress":
+            if stats:
+                stats(block)
+            block = {}
 
 
 def run(tool: str, args: list[str], *, cwd: Path | None = None,
-        progress: Callable[[float], None] | None = None) -> subprocess.CompletedProcess:
+        progress: Callable[[float], None] | None = None,
+        stats: Callable[[dict], None] | None = None) -> subprocess.CompletedProcess:
     """Запускает утилиту; при ошибке бросает ToolError с хвостом stderr, при остановке — Cancelled.
 
     progress (только ffmpeg) получает, до какой секунды дошла обработка.
@@ -114,7 +122,7 @@ def run(tool: str, args: list[str], *, cwd: Path | None = None,
             _procs.add(proc)
         try:
             if progress and tool == "ffmpeg":
-                _read_progress(proc.stdout, progress)
+                _read_progress(proc.stdout, progress, stats)
                 stdout = ""
             else:
                 stdout = proc.stdout.read()
@@ -133,8 +141,9 @@ def run(tool: str, args: list[str], *, cwd: Path | None = None,
 
 
 def ffmpeg(args: list[str], *, cwd: Path | None = None,
-           progress: Callable[[float], None] | None = None) -> subprocess.CompletedProcess:
-    return run("ffmpeg", ["-y", *args], cwd=cwd, progress=progress)
+           progress: Callable[[float], None] | None = None,
+           stats: Callable[[dict], None] | None = None) -> subprocess.CompletedProcess:
+    return run("ffmpeg", ["-y", *args], cwd=cwd, progress=progress, stats=stats)
 
 
 def concat_list(paths: list[Path], list_file: Path) -> Path:

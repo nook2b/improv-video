@@ -146,33 +146,112 @@ class DayProgress:
 class Meter:
     """Сумма обработанных секунд по нескольким параллельным процессам ffmpeg → доля этапа."""
 
-    def __init__(self, progress: DayProgress | None, stage: str, total_seconds: float):
+    def __init__(self, progress: DayProgress | None, stage: str, total_seconds: float,
+                 clock: Callable[[], float] = time.monotonic):
         self.progress, self.stage = progress, stage
         self.total = max(total_seconds, 1e-6)
+        self.clock = clock
         self._done: dict[object, float] = {}
         self._lock = threading.Lock()
+        self._sum = 0.0
+        self.last_change = clock()
+        self._running: dict[object, dict] = {}  # процесс → подпись, начало, последний блок ffmpeg -progress
 
-    def track(self, key: object, offset: float = 0.0) -> Callable[[float], None] | None:
-        """Колбэк для tools.run(progress=…): key — один процесс, offset — уже учтённые секунды."""
-        if self.progress is None:
-            return None
-
-        def update(seconds: float) -> None:
-            with self._lock:
-                self._done[key] = offset + seconds
-                total = sum(self._done.values())
+    def _set(self, key: object, seconds: float) -> None:
+        with self._lock:
+            self._done[key] = seconds
+            total = sum(self._done.values())
+            if total > self._sum + 0.05:
+                self._sum, self.last_change = total, self.clock()
+        if self.progress is not None:
             self.progress.set(self.stage, total / self.total)
+
+    def watch(self, key: object, label: str) -> Callable[[dict], None]:
+        """Колбэк для tools.run(stats=…): что сейчас делает процесс — для журнала, когда прогресса нет."""
+        now = self.clock()
+        info = {"label": label, "started": now, "seen": None, "stats": {}}
+        with self._lock:
+            self._running[key] = info
+
+        def update(block: dict) -> None:
+            info["stats"], info["seen"] = block, self.clock()
+
+        return update
+
+    def forget(self, key: object) -> None:
+        with self._lock:
+            self._running.pop(key, None)
+
+    def describe(self) -> list[str]:
+        """По строке на идущий процесс: «запись 1, кусок 3: кадр 1200, 24 к/с, ×0.8, ffmpeg молчит 95 с»."""
+        now = self.clock()
+        out = []
+        with self._lock:
+            running = list(self._running.values())
+        for info in running:
+            st, seen = info["stats"], info["seen"]
+            if seen is None:
+                out.append(f"{info['label']}: ffmpeg ещё ничего не сообщил за {now - info['started']:.0f} с")
+                continue
+            line = (f"{info['label']}: кадр {st.get('frame', '?')}, {st.get('fps', '?')} к/с, "
+                    f"скорость {st.get('speed', '?').strip()}")
+            if now - seen > 5:
+                line += f", ffmpeg молчит {now - seen:.0f} с"
+            out.append(line)
+        return out
+
+    def track(self, key: object, offset: float = 0.0) -> Callable[[float], None]:
+        """Колбэк для tools.run(progress=…): key — один процесс, offset — уже учтённые секунды."""
+        def update(seconds: float) -> None:
+            self._set(key, offset + seconds)
 
         return update
 
     def add(self, key: object, seconds: float) -> None:
         """Отметить кусок работы целиком выполненным (без колбэка ffmpeg)."""
-        if self.progress is None:
-            return
-        with self._lock:
-            self._done[key] = seconds
-            total = sum(self._done.values())
-        self.progress.set(self.stage, total / self.total)
+        self._set(key, seconds)
+
+
+class StallWatch:
+    """Пока этап идёт: если STALL_SECONDS нет прогресса — одна строка в журнал о том, что делает каждый
+    процесс и как отвечает источник (check), и ещё одна, когда прогресс пошёл снова."""
+
+    def __init__(self, meter: Meter, notify: Callable[[str], None], check: Callable[[], str] | None = None,
+                 every: float = 10.0, stall: float = STALL_SECONDS):
+        self.meter, self.notify, self.check, self.every, self.stall = meter, notify, check, every, stall
+        self._stop = threading.Event()
+        self._thread = threading.Thread(target=self._loop, daemon=True)
+
+    def __enter__(self):
+        self._thread.start()
+        return self
+
+    def __exit__(self, *exc):
+        self._stop.set()
+        self._thread.join(timeout=self.every + 1)
+
+    def poll(self, stalled_since: float | None) -> float | None:
+        """Один шаг проверки; возвращает, с какого момента стоим (None — идёт)."""
+        idle = self.meter.clock() - self.meter.last_change
+        if stalled_since is None and idle >= self.stall:
+            parts = self.meter.describe()
+            if self.check:
+                parts.append(self.check())
+            self.notify(f"Нет прогресса {idle:.0f} с: " + "; ".join(parts))
+            return self.meter.last_change
+        if stalled_since is not None and idle < self.stall:
+            pause = self.meter.last_change - stalled_since
+            self.notify(f"Прогресс снова идёт, пауза была {minutes(pause) if pause >= 60 else f'{pause:.0f} с'}")
+            return None
+        return stalled_since
+
+    def _loop(self) -> None:
+        since = None
+        while not self._stop.wait(self.every):
+            try:
+                since = self.poll(since)
+            except Exception:  # noqa: BLE001 — диагностика не должна ронять сборку
+                pass
 
 
 def minutes(seconds: float) -> str:

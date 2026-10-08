@@ -6,7 +6,7 @@ import pytest
 
 from improv_video import tools
 from improv_video.pipeline import build_pending, import_card, recent_videos
-from improv_video.progress import STALL_SECONDS, DayProgress, Meter
+from improv_video.progress import STALL_SECONDS, DayProgress, Meter, StallWatch
 from improv_video.state import State
 
 
@@ -126,3 +126,39 @@ def test_build_reports_all_stages_and_failures_are_listed(card, settings):
     # Собрался со второй попытки — отметка о сбое снимается
     assert build_pending(other, state, settings, notify=lambda _: None, source=card) is not None
     assert f"d{other.isoformat()}" not in {it.key for it in recent_videos(state)}
+
+
+def test_stall_watch_logs_what_each_process_does():
+    clock = Clock()
+    m = Meter(None, "encode", 100, clock=clock)
+    notes = []
+    w = StallWatch(m, notes.append, check=lambda: "источник: 8 МБ за 0.1 с")
+    a, b = m.track("a"), m.track("b")
+    m.watch("b", "запись 1 с 5:00")
+    sa = m.watch("a", "запись 1 с 0:00")
+    clock.t = 10
+    a(10)
+    sa({"frame": "300", "fps": "30.0", "speed": "1.0x", "progress": "continue"})
+    since = w.poll(None)
+    assert since is None and notes == []
+
+    clock.t = 10 + STALL_SECONDS + 5
+    since = w.poll(since)
+    assert since == 10 and len(notes) == 1
+    assert "запись 1 с 0:00: кадр 300, 30.0 к/с, скорость 1.0x, ffmpeg молчит" in notes[0]
+    assert "запись 1 с 5:00: ffmpeg ещё ничего не сообщил" in notes[0]
+    assert notes[0].endswith("источник: 8 МБ за 0.1 с")
+    assert w.poll(since) == since and len(notes) == 1  # одна запись на паузу
+
+    clock.t += 30
+    b(5)
+    assert w.poll(since) is None and "Прогресс снова идёт, пауза была" in notes[1]
+
+
+def test_read_check(tmp_path):
+    from improv_video.pipeline import read_check
+
+    f = tmp_path / "clip.mp4"
+    f.write_bytes(b"x" * (10 << 20))
+    assert read_check([f]).startswith("источник: 8 МБ за")
+    assert "недоступны" in read_check([tmp_path / "нет.mp4"])
