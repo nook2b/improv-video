@@ -85,8 +85,24 @@ def estimate_build_bytes(durations: list[float], max_height: int = 2160) -> int:
     return int(2 * final + 6 * wav + RESERVE_BYTES)
 
 
+def free_bytes(folder: Path) -> int:
+    """Сколько места можно занять. На Mac — как в «Хранилище»: вместе с тем, что macOS освобождает
+    сама по требованию (локальные снимки Time Machine, кэши iCloud и т. п.). shutil.disk_usage видит
+    только «чистое» свободное место: на заполненном Mac это 3 ГБ вместо 90."""
+    try:
+        from Foundation import NSURL, NSURLVolumeAvailableCapacityForImportantUsageKey
+
+        ok, value, _ = NSURL.fileURLWithPath_(str(folder)).getResourceValue_forKey_error_(
+            None, NSURLVolumeAvailableCapacityForImportantUsageKey, None)
+        if ok and value is not None and int(value) > 0:
+            return int(value)
+    except Exception:  # noqa: BLE001 — не Mac или нет PyObjC
+        pass
+    return shutil.disk_usage(folder).free
+
+
 def _check_space(folder: Path, need: int, what: str) -> None:
-    free = shutil.disk_usage(folder).free
+    free = free_bytes(folder)
     if free < need:
         raise NotEnoughSpace(f"{what}: нужно {need / GB:.0f} ГБ, свободно {free / GB:.0f} ГБ")
 

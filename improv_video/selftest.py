@@ -42,6 +42,13 @@ def main() -> int:
     except FileNotFoundError:
         print("deep-filter: нет (сильное шумоподавление недоступно)")
 
+    import shutil
+
+    from .pipeline import free_bytes
+
+    print(f"Свободно (как в «Хранилище»): {free_bytes(Path.home()) / 1e9:.1f} ГБ, "
+          f"без освобождаемого: {shutil.disk_usage(Path.home()).free / 1e9:.1f} ГБ")
+
     # Автообновление: сертификаты внутри приложения (без них — CERTIFICATE_VERIFY_FAILED)
     import ssl
     import urllib.error
