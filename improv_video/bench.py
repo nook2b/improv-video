@@ -35,6 +35,11 @@ CHAINS = {
         "scale=1920:1080:force_original_aspect_ratio=decrease:flags=lanczos:in_range=pc:in_color_matrix=bt709,"
         "format=gbrp10le,lut3d=file=lut.cube:interp=tetrahedral,scale=out_color_matrix=bt709:out_range=tv,"
         "format=p010le"),
+    "1080p: уменьшение на видеочипе (scale_vt), потом LUT": (
+        ["-hwaccel", "videotoolbox", "-hwaccel_output_format", "videotoolbox_vld"],
+        "scale_vt=w=1920:h=1080,hwdownload,format=nv12,scale=in_range=pc:in_color_matrix=bt709,"
+        "format=gbrp10le,lut3d=file=lut.cube:interp=tetrahedral,scale=out_color_matrix=bt709:out_range=tv,"
+        "format=p010le"),
     "2 пересчёта, float": (
         "scale=in_range=pc:in_color_matrix=bt709,format=gbrpf32le,lut3d=file=lut.cube:interp=tetrahedral,"
         "scale=out_color_matrix=bt709:out_range=tv,format=p010le"),
@@ -44,9 +49,15 @@ CHAINS = {
 }
 
 
-def _run(clip: Path, vf: str, cwd: Path) -> float:
+def _split(chain) -> tuple[list[str], str]:
+    """Цепочка — строка фильтров или (свои параметры декода, фильтры)."""
+    return chain if isinstance(chain, tuple) else (decode_args(), chain)
+
+
+def _run(clip: Path, chain, cwd: Path) -> float:
+    dec, vf = _split(chain)
     t0 = time.monotonic()
-    ffmpeg([*decode_args(), "-i", str(clip), "-frames:v", str(FRAMES), "-vf", vf, "-an", "-f", "null", "-"], cwd=cwd)
+    ffmpeg([*dec, "-i", str(clip), "-frames:v", str(FRAMES), "-vf", vf, "-an", "-f", "null", "-"], cwd=cwd)
     return FRAMES / (time.monotonic() - t0)
 
 
@@ -78,10 +89,10 @@ def main(argv: list[str]) -> int:
                 best = (name, fps)
         # Несколько записей одновременно: суммарная скорость лучшей цепочки
         if best:
-            vf = CHAINS[best[0]]
+            dec, vf = _split(CHAINS[best[0]])
             for n in (2, 3, 4):
                 t0 = time.monotonic()
-                procs = [subprocess.Popen([find_tool("ffmpeg"), "-hide_banner", "-nostdin", "-y", *decode_args(),
+                procs = [subprocess.Popen([find_tool("ffmpeg"), "-hide_banner", "-nostdin", "-y", *dec,
                                            "-i", str(clip), "-frames:v", str(FRAMES), "-vf", vf, "-an", "-f", "null", "-"],
                                           cwd=work, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
                          for _ in range(n)]

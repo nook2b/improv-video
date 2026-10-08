@@ -83,15 +83,30 @@ def open_path(target: str | Path) -> None:
 
 @contextmanager
 def keep_awake():
-    """Не даёт Mac уснуть, пока идёт работа (крышка ноутбука при этом должна быть открыта)."""
-    proc = None
+    """Пока идёт работа: Mac не засыпает (крышка должна быть открыта) и не включает App Nap.
+
+    App Nap притормаживает фоновые приложения, когда за компьютером никого нет: по журналу
+    ночью куски кодировались в 3 раза медленнее, чем днём. Активность «по просьбе
+    пользователя» отключает App Nap и для запущенных ffmpeg.
+    """
+    proc, info, token = None, None, None
     try:
         proc = subprocess.Popen(["caffeinate", "-i", "-w", str(os.getpid())])
     except FileNotFoundError:
         pass
     try:
+        from Foundation import NSActivityIdleSystemSleepDisabled, NSActivityUserInitiated, NSProcessInfo
+
+        info = NSProcessInfo.processInfo()
+        token = info.beginActivityWithOptions_reason_(NSActivityUserInitiated | NSActivityIdleSystemSleepDisabled,
+                                                      "Сборка ролика improv-video")
+    except Exception:  # noqa: BLE001 — не Mac или нет PyObjC: остаётся caffeinate
+        token = None
+    try:
         yield
     finally:
+        if token is not None:
+            info.endActivity_(token)
         if proc:
             proc.terminate()
 

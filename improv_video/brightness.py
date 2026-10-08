@@ -33,20 +33,66 @@ def adjust_filter(profile: str, stops: float) -> str | None:
     return f"lutyuv=y='clip(64+(val-64)*{gain:.4f},minval,maxval)'"
 
 
+MAX_SAMPLES = 150  # кадров на замер дня: для автоцвета хватает, больше — только дольше
+SAMPLE_WORKERS = 4
+
+
 def sample_frames(clips: list[Path], out: Path, every: float = 2.0, src_range: str = "tv",
                   progress=None) -> Path:
-    """Кадр раз в every секунд, 480p, 10 бит без потерь — быстрый материал для замеров.
+    """Кадры для замеров: не чаще раза в every секунд и не больше MAX_SAMPLES, 480p, 10 бит без потерь.
 
-    Декодируются только опорные кадры (-skip_frame nokey): полный декод 4K HEVC медленнее реального времени.
+    К каждому моменту ffmpeg прыгает сразу (-ss до -i), поэтому с карты читаются только
+    несколько мегабайт вокруг кадра, а не весь файл: раньше замер дня читал десятки ГБ
+    и шёл 20–40 минут. progress получает «секунды видео», как и остальные этапы.
     """
-    lst = concat_list(clips, out.with_suffix(".txt"))
-    vf = f"fps=1/{every},scale=-2:480:flags=bilinear,{normalize_filter(src_range)}"
-    for fast in (True, False):
-        skip = ["-skip_frame", "nokey"] if fast else []
-        ffmpeg([*decode_args(), *skip, "-f", "concat", "-safe", "0", "-i", str(lst), "-an",
-                "-vf", vf, "-c:v", "ffv1", str(out)], progress=progress)
-        if _frame_count(out) > 0:
-            break
+    from concurrent.futures import ThreadPoolExecutor
+
+    from .probe import probe
+    from .tools import Cancelled, ToolError
+
+    clips = [Path(c) for c in clips]
+    durations = [max(probe(c).duration, 0.0) for c in clips]
+    total = sum(durations)
+    n = max(1, min(MAX_SAMPLES, math.ceil(total / max(every, 1e-3))))
+    jobs = []
+    for i in range(n):
+        t, start = (i + 0.5) * total / n, 0.0
+        for clip, d in zip(clips, durations):
+            if t < start + d or clip == clips[-1]:
+                jobs.append((i, clip, min(max(t - start, 0.0), max(d - 0.5, 0.0))))
+                break
+            start += d
+    work = out.parent / f"{out.stem}_frames"
+    shutil.rmtree(work, ignore_errors=True)
+    work.mkdir(parents=True)
+    vf = f"scale=-2:480:flags=bilinear,{normalize_filter(src_range)}"
+    done = 0
+
+    def grab(job):
+        nonlocal done
+        i, clip, at = job
+        frame = work / f"{i:04d}.mkv"
+        try:
+            ffmpeg([*decode_args(), "-ss", f"{at:.3f}", "-i", str(clip.resolve()), "-an", "-frames:v", "1",
+                    "-vf", vf, "-c:v", "ffv1", str(frame)])
+        except Cancelled:
+            raise
+        except ToolError:
+            frame = None  # битое место в файле — без этого кадра
+        done += 1
+        if progress:
+            progress(done / n * total)
+        return frame
+
+    with ThreadPoolExecutor(max_workers=SAMPLE_WORKERS) as pool:
+        frames = [f for f in pool.map(grab, jobs) if f is not None and f.exists() and f.stat().st_size > 0]
+    if not frames:
+        raise ValueError("Не удалось взять ни одного кадра для замера")
+    lst = concat_list(frames, work / "frames.txt")
+    # Склейка заново (кадры крошечные): у каждого своё время 0, setpts раскладывает их подряд
+    ffmpeg(["-f", "concat", "-safe", "0", "-i", str(lst), "-an", "-vf", "setpts=N/(25*TB)", "-r", "25",
+            "-c:v", "ffv1", str(out)])
+    shutil.rmtree(work, ignore_errors=True)
     return out
 
 
