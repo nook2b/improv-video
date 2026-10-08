@@ -78,6 +78,8 @@ jobs:
           path: ui-snapshots
 
       - name: Замер скорости цветовой обработки 4K
+        # ~3 мин машины Mac (минуты Mac в 10 раз дороже): только при ручном запуске
+        if: github.event_name == 'workflow_dispatch'
         run: dist/improv-video.app/Contents/MacOS/improv-video --bench calibration/AcePro2_I-Log_To_Rec.709_V1.0.cube
 
       - name: Архив
