@@ -8,7 +8,9 @@
 from __future__ import annotations
 
 import logging
+import os
 import threading
+import time
 from pathlib import Path
 
 import rumps
@@ -31,9 +33,9 @@ from AppKit import (
 )
 
 from .. import __version__
-from . import macos, views
+from . import macos, updater, views
 from . import menu_model as mm
-from .config import LOG_FILE, AppConfig
+from .config import LOG_FILE, SUPPORT_DIR, AppConfig
 from .controller import Controller
 
 TAB = 236  # где кончаются значения справа («1080p», «не вошли») перед стрелкой подменю
@@ -103,6 +105,7 @@ class MenuBarApp(rumps.App):
         self.controller = Controller(self.config, macos)
         self._icon_state = None
         self._video_keys = None
+        self._pending_update: tuple[str, Path] | None = None  # скачанная версия ждёт простоя
 
         # Верх: что происходит сейчас
         self.status_item = rumps.MenuItem("status")
@@ -144,6 +147,7 @@ class MenuBarApp(rumps.App):
             timer.start()
             # Пока меню открыто, обновлять блок прогресса тоже
             NSRunLoop.currentRunLoop().addTimer_forMode_(timer._nstimer, NSEventTrackingRunLoopMode)
+            threading.Thread(target=self._update_loop, daemon=True).start()
         self._tick(None)
 
     # ---------- подменю настроек ----------
@@ -203,6 +207,9 @@ class MenuBarApp(rumps.App):
         m.add(rumps.MenuItem("Вернуть клипы, отмеченные как обработанные…", callback=self.forget_skipped))
         m.add(rumps.MenuItem("Открыть журнал", callback=lambda _: macos.open_path(LOG_FILE)))
         m.add(rumps.separator)
+        self.auto_update_item = rumps.MenuItem("Обновлять автоматически", callback=self.toggle_auto_update)
+        m.add(self.auto_update_item)
+        m.add(rumps.MenuItem("Проверить обновления", callback=self.check_updates))
         version = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(f"improv-video {__version__}", None, "")
         version.setEnabled_(False)
         _raw(m, version)
@@ -236,6 +243,7 @@ class MenuBarApp(rumps.App):
         archive = mm.short_path(str(Path(cfg.archive).expanduser()), str(Path.home()))
         _set_title(self.archive_item, "Папка архива:", mm.ellipsize_middle(archive, 30) + "…")
         self.login_at_start.state = int(macos.launch_at_login_enabled())
+        self.auto_update_item.state = int(cfg.auto_update)
 
     # ---------- обновление раз в секунду ----------
 
@@ -254,6 +262,8 @@ class MenuBarApp(rumps.App):
         self.stop_item._menuitem.setHidden_(not busy)
         self.quit_item.title = "Выйти…" if busy else "Выйти"
         self._update_icon(*mm.icon_state(progress=c.progress, busy=busy, videos=videos))
+        if self._pending_update and not busy and not c.delivering:
+            self._install_update()
 
         tracking = NSRunLoop.currentRunLoop().currentMode() == NSEventTrackingRunLoopMode
         if not tracking:  # подменю перестраиваем только при закрытом меню
@@ -370,6 +380,58 @@ class MenuBarApp(rumps.App):
         self.config.auto_brightness = not self.config.auto_brightness
         self._changed()
 
+    # ---------- обновление приложения ----------
+
+    def _update_loop(self) -> None:
+        time.sleep(60)  # не мешать запуску
+        while True:
+            if self.config.auto_update:
+                self._check_update(manual=False)
+            time.sleep(updater.CHECK_SECONDS)
+
+    @_in_thread
+    def check_updates(self, _):
+        self._check_update(manual=True)
+
+    def _check_update(self, manual: bool) -> None:
+        log = logging.getLogger("improv-video")
+        if updater.current_bundle() is None:
+            if manual:
+                macos.notify("improv-video", "Обновление работает только в собранном приложении")
+            return
+        try:
+            release = updater.latest()
+            if release is None or not updater.is_newer(release.version, __version__):
+                if manual:
+                    macos.notify("improv-video", f"У вас последняя версия {__version__}")
+                return
+            if self._pending_update and self._pending_update[0] == release.version:
+                return
+            log.info("Обновление: скачиваю %s", release.version)
+            app = updater.prepare(release, SUPPORT_DIR / "update")
+            self._pending_update = (release.version, app)
+            log.info("Обновление %s скачано, поставлю, когда обработка закончится", release.version)
+            if self.controller.busy:
+                macos.notify("improv-video", f"Версия {release.version} поставится, когда закончится обработка")
+        except Exception as e:  # noqa: BLE001 — нет сети, GitHub недоступен: попробуем в следующий раз
+            log.warning("Обновление не удалось: %s", e)
+            if manual:
+                macos.notify("improv-video", f"Не удалось проверить обновления: {str(e)[:120]}")
+
+    def _install_update(self) -> None:
+        version, app = self._pending_update
+        self._pending_update = None
+        bundle = updater.current_bundle()
+        if bundle is None or not app.exists():
+            return
+        logging.getLogger("improv-video").info("Обновление до %s: перезапуск", version)
+        updater.launch_swap(app, bundle, SUPPORT_DIR / "update", os.getpid())
+        rumps.quit_application()
+
+    def toggle_auto_update(self, _):
+        self.config.auto_update = not self.config.auto_update
+        self._changed()
+
     def toggle_login_item(self, _):
         macos.set_launch_at_login(not macos.launch_at_login_enabled())
         self._refresh_settings()
@@ -470,4 +532,9 @@ def main() -> None:
     logging.getLogger("improv-video").info(
         "improv-video %s: архив %s, копировать клипы: %s, качество %sp",
         __version__, config.archive, "да" if config.copy_clips else "нет", config.max_height)
+    if config.last_version != __version__:
+        if config.last_version:
+            macos.notify("improv-video", f"Обновлено: {config.last_version} → {__version__}")
+        config.last_version = __version__
+        config.save()
     MenuBarApp().run()

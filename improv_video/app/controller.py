@@ -84,6 +84,10 @@ class Controller:
         self._status = text
 
     @property
+    def delivering(self) -> bool:
+        return self._delivering
+
+    @property
     def busy(self) -> bool:
         return self._status != IDLE or self.progress is not None or bool(self.uploading)
 

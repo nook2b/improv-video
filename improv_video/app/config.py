@@ -27,6 +27,8 @@ class AppConfig:
     upload_mode: str = "manual"
     last_kind: str = "training"
     channel_name: str = "Иван improv"  # подпись в подменю YouTube
+    auto_update: bool = True  # новые версии из релизов GitHub ставятся сами, когда ничего не обрабатывается
+    last_version: str = ""  # с какой версией запускались в прошлый раз — для «Обновлено до …»
 
     @classmethod
     def load(cls, path: Path | None = None) -> "AppConfig":

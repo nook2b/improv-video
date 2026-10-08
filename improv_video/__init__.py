@@ -1,3 +1,3 @@
 """Insta360 Ace Pro 2 → YouTube: ядро конвейера."""
 
-__version__ = "0.1.13"
+__version__ = "0.1.14"
