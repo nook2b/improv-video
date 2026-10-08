@@ -47,9 +47,26 @@ def is_newer(candidate: str, current: str) -> bool:
     return bool(new) and bool(cur) and new > cur
 
 
+def _ssl_context():
+    """Сертификаты из certifi: у Python внутри приложения своих нет — без этого «CERTIFICATE_VERIFY_FAILED»."""
+    import ssl
+
+    try:
+        import certifi
+
+        return ssl.create_default_context(cafile=certifi.where())
+    except ImportError:
+        return ssl.create_default_context()
+
+
+def _open(url: str, timeout: float, accept: str | None = None):
+    headers = {"User-Agent": "improv-video", **({"Accept": accept} if accept else {})}
+    return urllib.request.urlopen(urllib.request.Request(url, headers=headers), timeout=timeout,
+                                  context=_ssl_context() if url.startswith("https:") else None)
+
+
 def _get(url: str, timeout: float = 30) -> bytes:
-    req = urllib.request.Request(url, headers={"User-Agent": "improv-video", "Accept": "application/vnd.github+json"})
-    with urllib.request.urlopen(req, timeout=timeout) as r:
+    with _open(url, timeout, "application/vnd.github+json") as r:
         return r.read()
 
 
@@ -71,8 +88,7 @@ def current_bundle() -> Path | None:
 
 
 def _download(url: str, dest: Path) -> None:
-    req = urllib.request.Request(url, headers={"User-Agent": "improv-video"})
-    with urllib.request.urlopen(req, timeout=60) as r, open(dest, "wb") as f:
+    with _open(url, 60) as r, open(dest, "wb") as f:
         shutil.copyfileobj(r, f, 1 << 20)
 
 

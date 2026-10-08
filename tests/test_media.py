@@ -139,3 +139,18 @@ def test_full_range_input_matches_limited(tmp_path, identity_lut):
         s = brightness.sample_frames([path], tmp_path / f"{path.stem}.mkv", 1.0, probe(path).color_range)
         values.append(brightness.measure(s, identity_lut, "ilog", 0))
     assert abs(values[0] - values[1]) < 0.01, values
+
+
+def test_broken_clip_is_skipped_not_whole_card(tmp_path, settings):
+    """Оборванная запись (нет moov) не должна останавливать всю карту."""
+    card = tmp_path / "card"
+    cam = card / "DCIM" / "Camera01"
+    make_clip(cam / "VID_20261001_180500_00_001.mp4", 2)
+    broken = cam / "VID_20260719_194558_00_578.mp4"
+    broken.write_bytes((cam / "VID_20261001_180500_00_001.mp4").read_bytes()[:4000])  # обрыв: только начало
+    state = State(settings.archive / "state.sqlite")
+    notes = []
+    days = import_card(card, state, settings, notify=notes.append)
+    assert [names for names in days.values()] == [["VID_20261001_180500_00_001.mp4"]]
+    assert any(n.startswith("Повреждён и пропущен: VID_20260719_194558_00_578.mp4") for n in notes)
+    assert import_card(card, state, settings, notify=notes.append) == {}  # второй раз не спотыкается

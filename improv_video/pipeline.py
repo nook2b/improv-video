@@ -146,7 +146,19 @@ def import_card(volume: Path, state: State, settings: Settings, notify: Notify =
     clips = new_clips_on_card(volume, state)
     if not clips:
         return {}
-    parts = [Part(c, probe(c.path)) for c in clips]
+    parts, broken = [], []
+    for c in clips:
+        try:
+            parts.append(Part(c, probe(c.path)))
+        except ToolError:  # запись оборвалась (села батарея): у файла нет оглавления, его не открыть
+            broken.append(c)
+            state.add_clip(c.name, c.size, shooting_day(c.start, settings.day_start), status="broken")
+    if broken:
+        notify(f"Повреждён и пропущен: {', '.join(c.name for c in broken)} — запись, видимо, оборвалась; "
+               "остальные клипы обрабатываются")
+    clips = [p.clip for p in parts]
+    if not clips:
+        return {}
     settings.archive.mkdir(parents=True, exist_ok=True)
     clips_bytes = sum(c.size for c in clips)
     hours = sum(p.media.duration for p in parts) / 3600

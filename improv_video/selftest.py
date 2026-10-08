@@ -42,6 +42,22 @@ def main() -> int:
     except FileNotFoundError:
         print("deep-filter: нет (сильное шумоподавление недоступно)")
 
+    # Автообновление: сертификаты внутри приложения (без них — CERTIFICATE_VERIFY_FAILED)
+    import ssl
+    import urllib.error
+
+    from .app import updater
+
+    tls_ok = True
+    try:
+        with updater._open("https://github.com/nook2b/improv-video/releases", 30) as r:
+            print("HTTPS до GitHub:", r.status)
+    except urllib.error.HTTPError as e:  # сертификат принят, ответ сервера не важен
+        print("HTTPS до GitHub: сертификат принят, ответ", e.code)
+    except urllib.error.URLError as e:
+        tls_ok = not isinstance(e.reason, ssl.SSLError)
+        print("HTTPS до GitHub:", e.reason)
+
     with tempfile.TemporaryDirectory() as tmp:
         work = Path(tmp)
         a = work / "VID_20261001_180000_00_001.mp4"
@@ -53,7 +69,7 @@ def main() -> int:
         r = build_day(date(2026, 10, 1), [a, b], "training", 1, settings, work / "out.mp4", notify=print)
         m = probe(r.file)
         print(f"ролик: {r.title} · {m.width}x{m.height} · {float(m.fps):.3f} к/с · {m.duration:.2f} с · {r.encoder}")
-        ok = abs(m.duration - 5) < 0.2 and m.has_audio and float(m.fps) < 30
+        ok = abs(m.duration - 5) < 0.2 and m.has_audio and float(m.fps) < 30 and tls_ok
     print("ИТОГ:", "OK" if ok else "ОШИБКА")
     return 0 if ok else 1
 

@@ -198,7 +198,7 @@ class Controller:
     def _progress(self, text: str) -> None:
         log.info(text)
         self.status = text
-        if text.startswith(("Найдено", "Можно извлечь")):
+        if text.startswith(("Найдено", "Можно извлечь", "Повреждён")):
             self.ui.notify("improv-video", text)
 
     def _save_config(self) -> None:

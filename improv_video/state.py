@@ -11,7 +11,7 @@ CREATE TABLE IF NOT EXISTS clips (
     name   TEXT NOT NULL,
     size   INTEGER NOT NULL,
     day    TEXT NOT NULL,
-    status TEXT NOT NULL,          -- copied | skipped (помечен как уже обработанный)
+    status TEXT NOT NULL,          -- copied | skipped (помечен как уже обработанный) | broken (не открывается)
     video  INTEGER REFERENCES videos(id),
     PRIMARY KEY (name, size)
 );
