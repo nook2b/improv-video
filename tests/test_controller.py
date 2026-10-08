@@ -212,3 +212,37 @@ def test_interrupted_build_is_released_on_start(card, tmp_path):
     assert check.unassigned_clips(day) == ["VID_20261001_180500_00_578.mp4"]
     assert check.videos() == []
     assert not junk.exists()
+
+
+def test_menu_actions_work_while_card_is_processing(card, tmp_path, monkeypatch):
+    """Ответ «Что снимали?» и ручная выдача не ждут, пока соберутся все дни с флешки."""
+    import threading
+    import time
+    from datetime import date
+
+    from improv_video.state import State
+
+    monkeypatch.setattr("improv_video.app.config.AppConfig.settings", _fast_settings(AppConfig.settings))
+    ui = FakeUI({"первый запуск": "Обработать все"})  # на «Что снимали?» не отвечаем
+    c = make_controller(tmp_path, ui, copy_clips=False)
+    c.submit("source", card)
+    c.wait_idle(300)
+    day = date(2026, 10, 1)
+    vid = next(it.video_id for it in c.videos() if it.day == day)
+
+    busy = threading.Event()
+    c._do_block = lambda: busy.wait(30)  # очередь занята, как во время сборки других дней
+    c.submit("block")
+    c.set_kind(day, "lesson")
+    statuses = {it.day: (it.title, it.status) for it in c.videos()}
+    assert statuses[day] == ("Занятие 01.10.2026", "manual")  # тип записан сразу
+
+    c.hand_off_video(vid)
+    deadline = time.monotonic() + 10
+    while not any(n == "Занятие 01.10.2026" for n, _, _ in ui.ready) and time.monotonic() < deadline:
+        time.sleep(0.05)
+    assert any(n == "Занятие 01.10.2026" for n, _, _ in ui.ready)  # окно «Ролик готов» без очереди
+    busy.set()
+    c.wait_idle(60)
+    c.stop()
+    assert State(tmp_path / "Footage" / "state.sqlite").video(vid)["status"] == "handed"

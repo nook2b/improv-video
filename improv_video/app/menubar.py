@@ -314,7 +314,7 @@ class MenuBarApp(rumps.App):
             span = it.detail.partition(" · ")[2]  # «Ждёт выбора типа · 18:05–20:40»
             c.ask_kind(it.day, span)
         elif row.action == "hand_off" and it.video_id:
-            c.submit("hand_off_video", it.video_id)
+            c.hand_off_video(it.video_id)
         elif row.action == "open_url" and it.url:
             macos.open_path(it.url)
         elif row.action == "open_log":

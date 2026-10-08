@@ -11,6 +11,7 @@ import queue
 import shutil
 import threading
 import time
+from contextlib import contextmanager
 from datetime import date, datetime
 from functools import partial
 from pathlib import Path
@@ -280,13 +281,19 @@ class Controller:
     def _ask_kind(self, day: date, meta: str = "", note: str = "") -> None:
         kind = self.ui.ask_kind(day, meta, note, self.config.last_kind, KIND_WAIT_SECONDS)
         if kind in KINDS:
-            self.submit("kind", day, kind)
+            self.set_kind(day, kind)
 
-    def _do_kind(self, day: date, kind: str) -> None:
-        self.state.set_day_kind(day, kind)
+    def set_kind(self, day: date, kind: str) -> None:
+        """Ответ на «Что снимали?» записывается сразу, а не в очередь: там может часами идти сборка
+        других дней. Выдача ролика (окно «Ролик готов» или загрузка) — в очередь, когда дойдёт."""
+        with self._own_state() as state:
+            state.set_day_kind(day, kind)
         self.config.last_kind = kind
         self._save_config()
-        self._do_deliver()
+        progress = self.progress
+        if progress is not None and progress.day == day:
+            progress.label = title(kind, day)
+        self.submit("deliver")
 
     def _do_forget_skipped(self) -> None:
         n = self.state.forget_skipped()
@@ -319,20 +326,31 @@ class Controller:
         if "загружено" in text:
             self.ui.notify("YouTube", text)
 
-    def _do_hand_off_video(self, video_id: int) -> None:
-        """Строка «Загрузить вручную» в списке «Ролики»."""
-        row = self.state.video(video_id)
-        if not row or not row["file"]:
-            return
-        name, desc, _ = video_metadata(row)
-        self.state.update_video(video_id, status="manual")
+    @contextmanager
+    def _own_state(self):
+        """Своё подключение к журналу для действий из меню и окон: не ждать очередь со сборкой."""
+        state = State(Path(self.config.archive).expanduser() / "state.sqlite")
+        try:
+            yield state
+        finally:
+            state.close()
+
+    def hand_off_video(self, video_id: int) -> None:
+        """Строка «Загрузить вручную» в списке «Ролики» — сразу, даже во время сборки."""
+        with self._own_state() as state:
+            row = state.video(video_id)
+            if not row or not row["file"]:
+                return
+            name, desc, _ = video_metadata(row)
+            state.update_video(video_id, status="manual")
         self._spawn(self._hand_off, name, desc, Path(row["file"]), video_id)
 
-    def _do_handed(self, video_id: int) -> None:
+    def _mark_handed(self, video_id: int) -> None:
         """«Готово» в окне «Ролик готов»: ролик передан в YouTube Studio."""
-        row = self.state.video(video_id)
-        if row and row["status"] == "manual":
-            self.state.update_video(video_id, status="handed")
+        with self._own_state() as state:
+            row = state.video(video_id)
+            if row and row["status"] == "manual":
+                state.update_video(video_id, status="handed")
 
     def ask_kind(self, day: date, meta: str = "") -> None:
         """Строка «Ждёт выбора типа» в списке «Ролики»."""
@@ -349,7 +367,7 @@ class Controller:
         self.ui.open_path(STUDIO_URL)
         self.ui.show_ready(name, desc, file)
         if video_id is not None:
-            self.submit("handed", video_id)
+            self._mark_handed(video_id)
 
     # ---------- YouTube ----------
 
