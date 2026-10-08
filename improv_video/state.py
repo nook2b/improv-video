@@ -100,14 +100,16 @@ class State:
 
     def create_video(self, day: date, clip_names: list[str], kind: str | None = None) -> tuple[int, int]:
         """Новый ролик за день с номером части; возвращает (id, part)."""
-        kind = kind or self.day_kind(day)
         with self.db:
             part = self.db.execute(
                 "SELECT COALESCE(MAX(part), 0) + 1 FROM videos WHERE day = ?", (day.isoformat(),)
             ).fetchone()[0]
+            # Тип дня берётся тем же запросом: ответ на «Что снимали?» может прийти из окна
+            # в другом потоке ровно в этот момент и не должен потеряться между чтением и записью.
             cur = self.db.execute(
-                "INSERT INTO videos (day, part, kind, status) VALUES (?, ?, ?, 'pending')",
-                (day.isoformat(), part, kind),
+                "INSERT INTO videos (day, part, kind, status) "
+                "VALUES (?, ?, COALESCE(?, (SELECT kind FROM days WHERE day = ?)), 'pending')",
+                (day.isoformat(), part, kind, day.isoformat()),
             )
             video_id = cur.lastrowid
             self.db.executemany(
