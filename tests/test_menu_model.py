@@ -87,3 +87,35 @@ def test_values_and_paths():
     assert mm.short_path("/Users/ivan/Movies/improv-video", "/Users/ivan") == "~/Movies/improv-video"
     name = mm.ellipsize_middle("AcePro2_I-Log_To_Rec.709_V1.0.cube")
     assert len(name) == 28 and "…" in name and name.endswith(".cube")
+
+
+def test_update_line_and_notice():
+    from datetime import datetime, timedelta
+
+    now = datetime(2026, 10, 9, 14, 5)
+    u = mm.UpdateState()
+    assert mm.update_line("0.1.18", u) == "Версия 0.1.18"
+    u.stage, u.checked_at = "latest", now
+    assert mm.update_line("0.1.18", u) == "Версия 0.1.18 · последняя, проверено в 14:05"
+    assert mm.update_notice("0.1.18", u, now) is None
+    u.stage, u.version = "downloading", "0.1.19"
+    assert mm.update_line("0.1.18", u) == "Версия 0.1.18 · скачиваю 0.1.19…"
+    notice = mm.update_notice("0.1.18", u, now)
+    assert notice[0].title == "Скачиваю обновление 0.1.19" and notice[1]  # важнее ждущих роликов
+    waiting = [item("kind_needed", "07.10.2026", "Ждёт выбора типа")]
+    assert mm.status_block(progress=None, status="", busy=False, note=None, videos=waiting,
+                           update=notice).title == "Скачиваю обновление 0.1.19"
+    u.stage = "ready"
+    assert mm.update_line("0.1.18", u) == "Версия 0.1.18 · 0.1.19 поставится после обработки"
+    u.stage, u.checked_at = "error", now
+    assert mm.update_line("0.1.18", u) == "Версия 0.1.18 · не удалось проверить в 14:05"
+
+    after = mm.UpdateState(updated_from="0.1.17", updated_at=now)
+    notice = mm.update_notice("0.1.18", after, now + timedelta(hours=1))
+    assert (notice[0].title, notice[0].subtitle, notice[1]) == ("Обновлено до 0.1.18", "Было 0.1.17", False)
+    # «Обновлено» уступает роликам, которые ждут человека, и пропадает через 12 часов
+    assert mm.status_block(progress=None, status="", busy=False, note=None, videos=waiting,
+                           update=notice).title.endswith("ждёт вас")
+    assert mm.status_block(progress=None, status="", busy=False, note=None, videos=[],
+                           update=notice).title == "Обновлено до 0.1.18"
+    assert mm.update_notice("0.1.18", after, now + timedelta(hours=13)) is None

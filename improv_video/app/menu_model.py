@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from datetime import datetime, timedelta
 
 from ..pipeline import VideoItem
 from ..progress import DayProgress, StageView, minutes
@@ -100,14 +101,57 @@ def _stage_row(s: StageView, stalled: bool) -> StageRow:
     return StageRow(s.title, "pending")
 
 
+@dataclass
+class UpdateState:
+    """Обновление приложения — для блока вверху меню и строки версии в «Приложение»."""
+
+    stage: str = "idle"  # idle | checking | downloading | ready | latest | error
+    version: str = ""  # найденная новая версия
+    checked_at: datetime | None = None
+    updated_from: str = ""  # с какой версии обновились при этом запуске
+    updated_at: datetime | None = None
+
+
+UPDATED_NOTICE = timedelta(hours=12)  # столько после обновления вверху меню видно «Обновлено до …»
+
+
+def update_line(current: str, u: UpdateState) -> str:
+    """Строка версии: «Версия 0.1.18 · последняя, проверено в 14:05»."""
+    at = f"{u.checked_at:%H:%M}" if u.checked_at else ""
+    tail = {
+        "checking": "проверяю обновления…",
+        "downloading": f"скачиваю {u.version}…",
+        "ready": f"{u.version} поставится после обработки",
+        "latest": f"последняя, проверено в {at}",
+        "error": f"не удалось проверить в {at}",
+    }.get(u.stage, "")
+    return f"Версия {current}" + (f" · {tail}" if tail else "")
+
+
+def update_notice(current: str, u: UpdateState, now: datetime) -> tuple[StatusBlock, bool] | None:
+    """Блок вверху меню про обновление и важнее ли он роликов, ждущих человека."""
+    if u.stage == "downloading":
+        return StatusBlock(tone=ACTIVE, title=f"Скачиваю обновление {u.version}",
+                           subtitle="Потом приложение перезапустится само"), True
+    if u.stage == "ready":
+        return StatusBlock(tone=ACTIVE, title=f"Обновление {u.version} скачано",
+                           subtitle="Поставится, когда закончится обработка"), True
+    if u.updated_from and u.updated_at and now - u.updated_at < UPDATED_NOTICE:
+        return StatusBlock(tone=SUCCESS, icon="circle-check", title=f"Обновлено до {current}",
+                           subtitle=f"Было {u.updated_from}"), False
+    return None
+
+
 def status_block(*, progress: DayProgress | None, status: str, busy: bool, note: tuple[str, str] | None,
-                 videos: list[VideoItem]) -> StatusBlock:
+                 videos: list[VideoItem], update: tuple[StatusBlock, bool] | None = None) -> StatusBlock:
     if progress is not None:
         return StatusBlock(tone=ACTIVE, progress=progress_block(progress))
     if busy:
         return StatusBlock(tone=ACTIVE, title=status)
     if note:
         return StatusBlock(tone=SUCCESS, icon="circle-check", title=note[0], subtitle=note[1])
+    if update and update[1]:
+        return update[0]
     waiting = [v for v in videos if v.status in WAITING]
     if waiting:
         n = len(waiting)
@@ -119,6 +163,8 @@ def status_block(*, progress: DayProgress | None, status: str, busy: bool, note:
         text = " · ".join(what)
         return StatusBlock(tone=WARNING, title=f"{n} {_plural(n, 'ролик ждёт', 'ролика ждут', 'роликов ждут')} вас",
                            subtitle=text[:1].upper() + text[1:])
+    if update:
+        return update[0]
     last = next((v for v in videos if v.status in ("uploaded", "handed")), None)
     if last:
         where = "на YouTube" if last.status == "uploaded" else "передан в Studio"

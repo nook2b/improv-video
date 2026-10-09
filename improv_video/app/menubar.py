@@ -11,6 +11,7 @@ import logging
 import os
 import threading
 import time
+from datetime import datetime
 from pathlib import Path
 
 import rumps
@@ -102,7 +103,7 @@ def _raw(parent: rumps.MenuItem, nsitem) -> None:
 
 
 class MenuBarApp(rumps.App):
-    def __init__(self, start: bool = True):
+    def __init__(self, start: bool = True, updated_from: str = ""):
         super().__init__("improv-video", title=None, icon=str(views.ICONS / "menubar.png"), template=True,
                          quit_button=None)
         self.config = AppConfig.load()
@@ -110,6 +111,9 @@ class MenuBarApp(rumps.App):
         self._icon_state = None
         self._video_keys = None
         self._pending_update: tuple[str, Path] | None = None  # скачанная версия ждёт простоя
+        self.update_state = mm.UpdateState(updated_from=updated_from,
+                                           updated_at=datetime.now() if updated_from else None)
+        self._version_text = ""
 
         # Верх: что происходит сейчас
         self.status_item = rumps.MenuItem("status")
@@ -222,9 +226,9 @@ class MenuBarApp(rumps.App):
         self.auto_update_item = rumps.MenuItem("Обновлять автоматически", callback=self.toggle_auto_update)
         m.add(self.auto_update_item)
         m.add(rumps.MenuItem("Проверить обновления", callback=self.check_updates))
-        version = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(f"improv-video {__version__}", None, "")
-        version.setEnabled_(False)
-        _raw(m, version)
+        self.version_item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(f"Версия {__version__}", None, "")
+        self.version_item.setEnabled_(False)
+        _raw(m, self.version_item)
 
     def _refresh_settings(self):
         """Галочки и значения справа — после любого изменения настроек."""
@@ -270,7 +274,12 @@ class MenuBarApp(rumps.App):
         except Exception:  # noqa: BLE001 — журнал занят: покажем в следующую секунду
             videos = []
         busy = c.busy
-        model = mm.status_block(progress=c.progress, status=c.status, busy=busy, note=c.note, videos=videos)
+        model = mm.status_block(progress=c.progress, status=c.status, busy=busy, note=c.note, videos=videos,
+                                update=mm.update_notice(__version__, self.update_state, datetime.now()))
+        version_text = mm.update_line(__version__, self.update_state)
+        if version_text != self._version_text:
+            self._version_text = version_text
+            self.version_item.setTitle_(version_text)
         if self.status_view.update(model):
             menu = self.status_item._menuitem.menu()
             if menu is not None:
@@ -421,23 +430,33 @@ class MenuBarApp(rumps.App):
         if updater.current_bundle() is None:
             tell("Обновление работает только в собранном приложении")
             return
+        u = self.update_state
+        if u.stage in ("checking", "downloading"):
+            return  # проверка уже идёт
         try:
+            u.stage = "checking"
             release = updater.latest()
+            u.checked_at = datetime.now()
             if release is None or not updater.is_newer(release.version, __version__):
+                u.stage = "latest"
                 tell(f"У вас последняя версия: {__version__}")
                 return
             if self._pending_update and self._pending_update[0] == release.version:
+                u.stage = "ready"
                 tell(f"Версия {release.version} уже скачана и поставится, когда закончится обработка")
                 return
             tell(f"Нашлась версия {release.version} (у вас {__version__}). Скачиваю — приложение "
                  "перезапустится само" + (", когда закончится обработка" if self.controller.busy else ""))
             log.info("Обновление: скачиваю %s", release.version)
+            u.stage, u.version = "downloading", release.version
             app = updater.prepare(release, SUPPORT_DIR / "update")
+            u.stage = "ready"
             self._pending_update = (release.version, app)
             log.info("Обновление %s скачано, поставлю, когда обработка закончится", release.version)
             if self.controller.busy:
                 macos.notify("improv-video", f"Версия {release.version} поставится, когда закончится обработка")
         except Exception as e:  # noqa: BLE001 — нет сети, GitHub недоступен: попробуем в следующий раз
+            u.stage, u.checked_at = "error", datetime.now()
             log.warning("Обновление не удалось: %s", e)
             if manual:
                 threading.Thread(target=macos.dialog, args=(f"Не удалось проверить обновления: {str(e)[:200]}",
@@ -576,9 +595,9 @@ def main() -> None:
     logging.getLogger("improv-video").info(
         "improv-video %s: архив %s, копировать клипы: %s, качество %sp",
         __version__, config.archive, "да" if config.copy_clips else "нет", config.max_height)
+    updated_from = ""
     if config.last_version != __version__:
-        if config.last_version:
-            macos.notify("improv-video", f"Обновлено: {config.last_version} → {__version__}")
+        updated_from = config.last_version  # пусто при первом запуске
         config.last_version = __version__
         config.save()
-    MenuBarApp().run()
+    MenuBarApp(updated_from=updated_from).run()
