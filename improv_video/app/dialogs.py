@@ -14,12 +14,17 @@ from typing import Callable
 
 import objc
 from AppKit import (
+    NSAlert,
     NSApp,
     NSBackingStoreBuffered,
     NSBezierPath,
     NSColor,
     NSFloatingWindowLevel,
+    NSMakePoint,
     NSMakeRect,
+    NSMenu,
+    NSMenuItem,
+    NSTextField,
     NSTrackingActiveAlways,
     NSTrackingArea,
     NSTrackingInVisibleRect,
@@ -34,6 +39,7 @@ from AppKit import (
     NSWindowTitleHidden,
     NSWindowZoomButton,
 )
+from Foundation import NSObject
 from PyObjCTools import AppHelper
 
 from ..naming import KINDS
@@ -249,6 +255,93 @@ class KindInfo:
     meta: str = ""  # «18:05–20:40 · 1.5 ч · 12 клипов»
     day_note: str = ""  # «день 1 из 2»
     default: str = "training"  # как в прошлый раз
+    playlists: object = None  # controller.PlaylistChoice — строка «Плейлист», если есть вход с доступом к ним
+
+
+NO_PLAYLIST = "без плейлиста"
+
+
+def _playlist_of(entry):
+    """[id, название] из настроек → объект с .id и .title; None — без плейлиста."""
+    from ..youtube import Playlist
+
+    return Playlist(entry[0], entry[1]) if entry else None
+
+
+def chosen_playlist(c, info: KindInfo, kind: str):
+    """Выбранный в строке плейлист, а если его не трогали — последний для этого типа
+    (или для типа «как в прошлый раз»)."""
+    if "playlist" in c.state:
+        return c.state["playlist"]
+    by_kind = info.playlists.by_kind
+    return _playlist_of(by_kind.get(kind) if kind in by_kind else by_kind.get(info.default))
+
+
+class _MenuTarget(NSObject):
+    def pick_(self, sender):
+        self.callback(sender.tag())
+
+
+def _pick_playlist(c, info: KindInfo, x: float, y: float) -> None:
+    """Выпадающий список: плейлисты канала, «Новый плейлист…», «Без плейлиста»."""
+    items = list(info.playlists.playlists)
+    menu = NSMenu.alloc().init()
+    menu.setAutoenablesItems_(False)
+    target = _MenuTarget.alloc().init()
+    picked = {}
+    target.callback = lambda tag: picked.setdefault("tag", tag)
+    current = chosen_playlist(c, info, info.default)
+    for i, p in enumerate(items):
+        item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(p.title, "pick:", "")
+        item.setTarget_(target)
+        item.setTag_(i)
+        item.setState_(int(bool(current) and current.id == p.id))
+        menu.addItem_(item)
+    if items:
+        menu.addItem_(NSMenuItem.separatorItem())
+    for tag, label in ((-1, "Новый плейлист…"), (-2, "Без плейлиста")):
+        item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(label, "pick:", "")
+        item.setTarget_(target)
+        item.setTag_(tag)
+        menu.addItem_(item)
+    menu.popUpMenuPositioningItem_atLocation_inView_(None, NSMakePoint(x, y), c)
+    tag = picked.get("tag")
+    if tag is None:
+        return
+    if tag >= 0:
+        c.state["playlist"] = items[tag]
+    elif tag == -2:
+        c.state["playlist"] = None
+    else:
+        name = _ask_text("Новый плейлист", "Название, например имя команды", "Создать")
+        if not name:
+            return
+        try:
+            created = info.playlists.create(name)
+        except Exception as e:  # noqa: BLE001 — нет сети, нет доступа
+            _alert(f"Не удалось создать плейлист: {str(e)[:200]}")
+            return
+        info.playlists.playlists = sorted(items + [created], key=lambda p: p.title.lower())
+        c.state["playlist"] = created
+    c.setNeedsDisplay_(True)
+
+
+def _ask_text(title: str, placeholder: str, ok: str) -> str:
+    alert = NSAlert.alloc().init()
+    alert.setMessageText_(title)
+    alert.addButtonWithTitle_(ok)
+    alert.addButtonWithTitle_("Отмена")
+    field = NSTextField.alloc().initWithFrame_(NSMakeRect(0, 0, 260, 24))
+    field.setPlaceholderString_(placeholder)
+    alert.setAccessoryView_(field)
+    alert.window().setInitialFirstResponder_(field)
+    return field.stringValue().strip() if alert.runModal() == 1000 else ""  # 1000 — первая кнопка
+
+
+def _alert(text: str) -> None:
+    alert = NSAlert.alloc().init()
+    alert.setMessageText_(text)
+    alert.runModal()
 
 
 KIND_LABELS = KINDS
@@ -275,6 +368,14 @@ def kind_painter(info: KindInfo):
             draw_line(info.meta, x0 + 17, y, 12, font(12, digits=True), color("text-secondary", dark), draw=draw)
             y += 12
         y += 16
+        if info.playlists is not None:  # «Плейлист  [Команда А ▾]» — выбрать до карточки
+            if draw:
+                _playlist_row(c, info, x0, y, w, dark)
+            y += 30 + 6
+            hint = ("Для каждого типа запоминается свой плейлист" if "playlist" not in c.state
+                    else "Этот плейлист — для любой карточки ниже")
+            y += draw_wrapped(hint, x0, y, w, font(11), color("text-tertiary", dark), draw)
+            y += 12
         card_w = (w - 10) / 2
         for i, kind in enumerate(KINDS):  # по два в ряд
             cx, cy = x0 + i % 2 * (card_w + 10), y + i // 2 * (88 + 10)
@@ -286,6 +387,21 @@ def kind_painter(info: KindInfo):
                           x0, y, w, font(12), color("text-tertiary", dark), draw)
         return y + 18
     return paint
+
+
+def _playlist_row(c, info: KindInfo, x, y, w, dark) -> None:
+    draw_line("Плейлист", x, y, 30, font(13, 500), color("text-secondary", dark))
+    bx, bw = x + 80, w - 80
+    hover = c.hover == "playlist"
+    fill_round(bx - 0.5, y - 0.5, bw + 1, 31, 8.5, _rgba(BORDER_STRONG[dark] if hover else RING[dark]))
+    fill_round(bx, y, bw, 30, 8, _rgba(CONTROL_HOVER[dark] if hover else CONTROL[dark]))
+    p = chosen_playlist(c, info, info.default)
+    label = p.title if p else NO_PLAYLIST
+    ink = color("text-primary" if p else "text-tertiary", dark)
+    draw_line(_fit_middle(label, "", bw - 40, font(13)), bx + 12, y, 30, font(13), ink)
+    draw_line("▾", 0, y, 30, font(12), color("text-secondary", dark), right=bx + bw - 12)
+    c.hit("playlist", bx, y, bw, 30)
+    c.state["playlist_at"] = (bx, y + 30)
 
 
 def _kind_card(c, kind, chosen, x, y, w, info, dark) -> None:
@@ -308,15 +424,183 @@ def _kind_card(c, kind, chosen, x, y, w, info, dark) -> None:
 
 def build_kind(info: KindInfo, answer):
     canvas = Canvas.alloc().initWithFrame_(NSMakeRect(0, 0, 420, 300))
-    keys = {**{k: k for k in KINDS}, "later": None}
-    canvas.setup(kind_painter(info), lambda k: answer(keys[k]),
-                 lambda k: answer(info.default if k == "return" else None), WINDOW)
+
+    def reply(kind):
+        if kind is None or info.playlists is None:
+            answer(kind)
+        else:
+            answer((kind, chosen_playlist(canvas, info, kind)))
+
+    def click(key):
+        if key == "playlist":
+            _pick_playlist(canvas, info, *canvas.state.get("playlist_at", (0, 0)))
+        else:
+            reply(None if key == "later" else key)
+
+    canvas.setup(kind_painter(info), click, lambda k: reply(info.default if k == "return" else None), WINDOW)
     return _window(420, canvas)
 
 
-def ask_kind(info: KindInfo, timeout: float | None = None) -> str | None:
-    """Ключ из KINDS или None (закрыли — ответить позже)."""
+def ask_kind(info: KindInfo, timeout: float | None = None):
+    """Ключ из KINDS, (ключ, плейлист или None), если показан выбор плейлиста, или None — ответить позже."""
     return _ask(lambda answer: build_kind(info, answer), timeout)
+
+
+# ---------- «Обложка» ----------
+
+IMAGE_TYPES = ("jpg", "jpeg", "png", "heic", "heif", "webp", "gif", "bmp", "tif", "tiff")
+
+
+@dataclass
+class ThumbInfo:
+    videos: list  # [(id ролика, название)], новые сверху
+
+
+def thumb_painter(info: ThumbInfo):
+    def paint(c, dark, draw):
+        primary, secondary, tertiary = (color(n, dark) for n in ("text-primary", "text-secondary", "text-tertiary"))
+        x0, w = 20, 420 - 40
+        y = 20
+        draw_line("improv-video · обложка", x0, y, 11, font(11, 500), tertiary, draw=draw)
+        y += 11 + 6
+        y += draw_wrapped("Обложка для ролика на YouTube", x0, y, w, font(17, 600), primary, draw)
+        y += 14
+        if draw:  # «Ролик  [Шоу 08.10.2026 ▾]»
+            draw_line("Ролик", x0, y, 30, font(13, 500), secondary)
+            bx, bw = x0 + 80, w - 80
+            hover = c.hover == "video"
+            fill_round(bx - 0.5, y - 0.5, bw + 1, 31, 8.5, _rgba(BORDER_STRONG[dark] if hover else RING[dark]))
+            fill_round(bx, y, bw, 30, 8, _rgba(CONTROL_HOVER[dark] if hover else CONTROL[dark]))
+            name = c.state.get("video", info.videos[0] if info.videos else (None, "—"))[1]
+            draw_line(_fit_middle(name, "", bw - 40, font(13)), bx + 12, y, 30, font(13), primary)
+            draw_line("▾", 0, y, 30, font(12), secondary, right=bx + bw - 12)
+            c.hit("video", bx, y, bw, 30)
+            c.state["video_at"] = (bx, y + 30)
+        y += 30 + 12
+        zone_h = 130
+        if draw:  # место для картинки: перетащить сюда или «Выбрать файл…»
+            over = c.state.get("drag_over") or c.hover == "pick"
+            fill_round(x0 - 1, y - 1, w + 2, zone_h + 2, 13, color("accent", dark) if over else _rgba(BORDER_STRONG[dark]))
+            fill_round(x0, y, w, zone_h, 12, _rgba(ACCENT_SOFT[dark]) if over else color("bg-field", dark))
+            image = c.state.get("image")
+            if image:
+                draw_icon("circle-check", x0 + w / 2 - 9, y + 34, 18, color("accent", dark))
+                _centered(_fit_middle(Path(image).name, "", w - 40, font(13, 500)), y + 60, 18, font(13, 500), primary, x0 + w / 2)
+                _centered("Перетащите другую, чтобы заменить", y + 82, 15, font(12), secondary, x0 + w / 2)
+            else:
+                draw_icon("folder-open", x0 + w / 2 - 9, y + 34, 18, secondary)
+                _centered("Перетащите картинку сюда", y + 60, 18, font(13, 500), primary, x0 + w / 2)
+                _centered("или нажмите, чтобы выбрать файл", y + 82, 15, font(12), secondary, x0 + w / 2)
+            c.hit("pick", x0, y, w, zone_h)
+        y += zone_h + 10
+        y += draw_wrapped("JPEG, PNG, HEIC… — приложение само ужмёт до 1280 px и 2 МБ. Свои обложки YouTube "
+                          "разрешает каналам с подтверждённым телефоном.", x0, y, w, font(11), tertiary, draw)
+        y += 16
+        buttons = [Btn("cancel", "Отмена", "ghost")]
+        if c.state.get("image"):
+            buttons.append(Btn("set", "Поставить", "primary"))
+        draw_buttons_right(c, buttons, x0 + w, y, dark, draw)
+        return y + 28 + 16
+    return paint
+
+
+def _centered(text, y, line, fnt, col, cx) -> None:
+    draw_line(text, cx - text_width(text, fnt) / 2, y, line, fnt, col)
+
+
+class ThumbCanvas(Canvas):
+    """Холст окна «Обложка»: принимает перетащенную картинку."""
+
+    def draggingEntered_(self, sender):
+        if self._dragged_image(sender) is None:
+            return 0  # NSDragOperationNone
+        self.state["drag_over"] = True
+        self.setNeedsDisplay_(True)
+        return 1  # NSDragOperationCopy
+
+    def draggingExited_(self, sender):
+        self.state["drag_over"] = False
+        self.setNeedsDisplay_(True)
+
+    def performDragOperation_(self, sender):
+        image = self._dragged_image(sender)
+        self.state["drag_over"] = False
+        if image is None:
+            return False
+        self.state["image"] = image
+        self.setNeedsDisplay_(True)
+        return True
+
+    @objc.python_method
+    def _dragged_image(self, sender):
+        from Foundation import NSURL
+
+        urls = sender.draggingPasteboard().readObjectsForClasses_options_(
+            [NSURL], {"NSPasteboardURLReadingFileURLsOnlyKey": True}) or []
+        for url in urls:
+            path = Path(str(url.path()))
+            if path.suffix.lower().lstrip(".") in IMAGE_TYPES:
+                return path
+        return None
+
+
+def _choose_image():
+    from AppKit import NSOpenPanel
+
+    panel = NSOpenPanel.openPanel()
+    panel.setAllowedFileTypes_(list(IMAGE_TYPES))
+    panel.setMessage_("Картинка для обложки")
+    if panel.runModal() == 1:  # NSModalResponseOK
+        return Path(str(panel.URL().path()))
+    return None
+
+
+def _pick_video(c, info: ThumbInfo, x: float, y: float) -> None:
+    menu = NSMenu.alloc().init()
+    target = _MenuTarget.alloc().init()
+    picked = {}
+    target.callback = lambda tag: picked.setdefault("tag", tag)
+    current = c.state.get("video", info.videos[0] if info.videos else None)
+    for i, (vid, name) in enumerate(info.videos):
+        item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(name, "pick:", "")
+        item.setTarget_(target)
+        item.setTag_(i)
+        item.setState_(int(bool(current) and current[0] == vid))
+        menu.addItem_(item)
+    menu.popUpMenuPositioningItem_atLocation_inView_(None, NSMakePoint(x, y), c)
+    if "tag" in picked:
+        c.state["video"] = info.videos[picked["tag"]]
+        c.setNeedsDisplay_(True)
+
+
+def build_thumb(info: ThumbInfo, answer):
+    canvas = ThumbCanvas.alloc().initWithFrame_(NSMakeRect(0, 0, 420, 300))
+
+    def finish():
+        if canvas.state.get("image") and info.videos:
+            answer((canvas.state.get("video", info.videos[0])[0], canvas.state["image"]))
+
+    def click(key):
+        if key == "video":
+            _pick_video(canvas, info, *canvas.state.get("video_at", (0, 0)))
+        elif key == "pick":
+            image = _choose_image()
+            if image:
+                canvas.state["image"] = image
+                canvas.setNeedsDisplay_(True)
+        elif key == "set":
+            finish()
+        else:
+            answer(None)
+
+    canvas.setup(thumb_painter(info), click, lambda k: finish() if k == "return" else answer(None), WINDOW)
+    canvas.registerForDraggedTypes_(["public.file-url"])
+    return _window(420, canvas)
+
+
+def ask_thumbnail(info: ThumbInfo):
+    """(id ролика, путь к картинке) или None."""
+    return _ask(lambda answer: build_thumb(info, answer))
 
 
 # ---------- «Ролик готов» (макет 07) ----------
@@ -530,6 +814,17 @@ def confirm_quit(label: str) -> bool:
 
 # ---------- картинки для самопроверки ----------
 
+class _DemoChoice:
+    from ..youtube import Playlist as _P
+
+    playlists = [_P("PLa", "Команда А"), _P("PLm", "Мастер-классы")]
+    by_kind = {"show": ["PLa", "Команда А"], "masterclass": ["PLm", "Мастер-классы"]}
+
+    @staticmethod
+    def create(name):
+        raise RuntimeError("демо")
+
+
 def render_demo(outdir: Path) -> list[Path]:
     from AppKit import NSAppearance, NSAppearanceNameAqua, NSAppearanceNameDarkAqua
 
@@ -538,7 +833,11 @@ def render_demo(outdir: Path) -> list[Path]:
                         WINDOW),
         "dialog-ready": (420, ready_painter(ReadyInfo("Тренировка 06.10.2026", "Снято 06.10.2026, 18:05–20:40",
                                                       Path("Тренировка 06.10.2026.mp4"), "4.2 ГБ")), WINDOW),
+        "dialog-kind-playlist": (420, kind_painter(KindInfo(
+            "06.10.2026", "18:05–20:40 · 1.5 ч · 12 клипов", "", "show", _DemoChoice())), WINDOW),
         "dialog-first-run": (420, first_run_painter(20, 3), WINDOW),
+        "dialog-thumb": (420, thumb_painter(ThumbInfo([(3, "Шоу 08.10.2026"), (2, "Тренировка 06.10.2026")])),
+                         WINDOW),
         "dialog-quit": (300, quit_painter("Тренировка 06.10.2026"), SHEET),
     }
     written = []

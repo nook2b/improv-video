@@ -178,6 +178,8 @@ class MenuBarApp(rumps.App):
         m.add(rumps.separator)
         self.test_item = rumps.MenuItem("Проверить загрузку…", callback=self.test_upload)
         m.add(self.test_item)
+        self.thumb_item = rumps.MenuItem("Поставить обложку…", callback=self.set_thumbnail)
+        m.add(self.thumb_item)
 
     def _build_processing(self):
         m = self.processing_menu
@@ -236,7 +238,9 @@ class MenuBarApp(rumps.App):
         signed = c.signed_in
         _set_title(self.youtube_menu, "YouTube", mm.youtube_value(signed, cfg.upload_mode))
         _set_title(self.processing_menu, "Обработка", mm.quality_value(cfg.max_height))
-        self.login_item.title = "Выйти" if signed else "Войти…"
+        self._old_login = signed and not self.controller.can_manage()  # вход до плейлистов и обложек
+        self.login_item.title = ("Войти заново — для плейлистов и обложек…" if self._old_login
+                                 else "Выйти" if signed else "Войти…")
         if self.account_view.signed_in != signed:
             self.account_view.signed_in = signed
             self.account_view.setNeedsDisplay_(True)
@@ -244,6 +248,7 @@ class MenuBarApp(rumps.App):
         self.mode_api.state = int(cfg.upload_mode == "api")
         self.mode_api.set_callback(self._set_mode("api") if signed else None)
         self.test_item.set_callback(self.test_upload if signed else None)
+        self.thumb_item.set_callback(self.set_thumbnail if signed else None)
 
         self.q1080.state = int(cfg.max_height < 2160)
         self.q2160.state = int(cfg.max_height >= 2160)
@@ -292,7 +297,7 @@ class MenuBarApp(rumps.App):
 
         tracking = NSRunLoop.currentRunLoop().currentMode() == NSEventTrackingRunLoopMode
         if not tracking:  # подменю перестраиваем только при закрытом меню
-            key = (c.signed_in, self.config.lut, self.config.archive)
+            key = (c.signed_in, c.logins, self.config.lut, self.config.archive)
             if key != self._settings_key:  # вход в YouTube, LUT и папка меняются не из меню
                 self._settings_key = key
                 self._refresh_settings()
@@ -371,6 +376,9 @@ class MenuBarApp(rumps.App):
         rumps.quit_application()
 
     def toggle_youtube(self, _):
+        if getattr(self, "_old_login", False):
+            self.controller.submit("login")  # новый вход заменит старый токен
+            return
         self.controller.submit("logout" if self.controller.signed_in else "login")
 
     def _changed(self):
@@ -505,6 +513,26 @@ class MenuBarApp(rumps.App):
         file = macos.choose_file("Короткое видео для проверки загрузки (загрузится «по ссылке»)", ["mp4", "mov"])
         if file:
             self.controller.submit("test_upload", file)
+
+    @_in_thread
+    def set_thumbnail(self, _):
+        c = self.controller
+        if not c.can_manage():
+            macos.dialog("Для обложек и плейлистов нужен вход в YouTube с новым доступом: "
+                         "YouTube → Выйти, затем «Войти…».", ["OK"])
+            return
+        videos = c.uploaded_videos()
+        if not videos:
+            macos.dialog("Обложку можно поставить ролику, загруженному через приложение "
+                         "(YouTube → Автоматически «по ссылке»).", ["OK"])
+            return
+        answer = macos.ask_thumbnail(videos)
+        if not answer:
+            return
+        try:
+            c.set_thumbnail(*answer)
+        except Exception as e:  # noqa: BLE001 — не картинка, не сжалась
+            macos.dialog(f"Не получилось подготовить обложку: {str(e)[:200]}", ["OK"])
 
     @_in_thread
     def choose_lut(self, _):

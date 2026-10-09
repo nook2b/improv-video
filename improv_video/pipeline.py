@@ -522,6 +522,40 @@ def upload_ready(state: State, settings: Settings, uploader: Callable[..., "obje
     return done
 
 
+def finish_uploaded(state: State, add_to_playlist: Callable[[str, str], None] | None,
+                    set_thumbnail: Callable[[str, Path], None] | None, notify: Notify = print) -> None:
+    """После загрузки: ролик — в плейлист своего дня, ждущая обложка — на YouTube.
+
+    Сбой одного ролика (сеть, удалённый плейлист) не мешает остальным; повторится при следующей выдаче.
+    """
+    from .youtube import NeedsLogin, QuotaExceeded, ThumbnailNotAllowed
+
+    for row in state.videos("uploaded"):
+        if not row["youtube_id"]:
+            continue
+        name = title(row["kind"], date.fromisoformat(row["day"]), row["part"]) if row["kind"] else row["day"]
+        playlist = state.day_playlist(date.fromisoformat(row["day"]))
+        try:
+            if add_to_playlist and playlist and row["in_playlist"] != playlist[0]:
+                add_to_playlist(playlist[0], row["youtube_id"])
+                state.update_video(row["id"], in_playlist=playlist[0])
+                notify(f"«{name}» добавлен в плейлист «{playlist[1]}»")
+            if set_thumbnail and row["thumbnail"]:
+                image = Path(row["thumbnail"])
+                if image.exists():
+                    set_thumbnail(row["youtube_id"], image)
+                    notify(f"Обложка «{name}» поставлена")
+                    image.unlink(missing_ok=True)
+                state.update_video(row["id"], thumbnail=None)
+        except (NeedsLogin, QuotaExceeded):
+            raise
+        except ThumbnailNotAllowed as e:
+            state.update_video(row["id"], thumbnail=None)
+            notify(str(e))
+        except Exception as e:  # noqa: BLE001
+            notify(f"«{name}»: не удалось — {str(e)[:150]}. Повторю позже")
+
+
 def trash_done_videos(state: State, days: int, trash: Callable[[Path], None],
                       now: datetime | None = None) -> list[str]:
     """Файлы роликов, переданных в Studio или загруженных days дней назад и раньше, — в Корзину.

@@ -84,3 +84,85 @@ def test_upload_is_unlisted_and_not_made_for_kids():
     assert body["status"]["selfDeclaredMadeForKids"] is False  # «Нет, это видео не для детей»
     assert body["status"]["privacyStatus"] == "unlisted"
     assert body["snippet"]["title"] == "Шоу 08.10.2026"
+
+
+class _Req:
+    def __init__(self, resp):
+        self.resp = resp
+
+    def execute(self, num_retries=0):
+        return self.resp
+
+
+class _FakeService:
+    """Ровно те вызовы API, что делает приложение для плейлистов."""
+
+    def __init__(self):
+        self.inserted = []
+
+    def playlists(self):
+        svc = self
+
+        class P:
+            def list(self, part, mine, maxResults, pageToken=None):
+                pages = {None: ({"items": [{"id": "2", "snippet": {"title": "шоу"}}], "nextPageToken": "n"}),
+                         "n": {"items": [{"id": "1", "snippet": {"title": "Команда А"}}]}}
+                return _Req(pages[pageToken])
+
+            def insert(self, part, body):
+                svc.inserted.append(("playlist", body))
+                return _Req({"id": "new", "snippet": body["snippet"]})
+        return P()
+
+    def playlistItems(self):
+        svc = self
+
+        class I:
+            def insert(self, part, body):
+                svc.inserted.append(("item", body))
+                return _Req({})
+        return I()
+
+
+def test_playlists_api_calls():
+    from improv_video import youtube
+
+    svc = _FakeService()
+    assert [p.title for p in youtube.list_playlists(service=svc)] == ["Команда А", "шоу"]  # все страницы, по алфавиту
+    p = youtube.create_playlist("Мастер-классы", service=svc)
+    assert (p.id, p.title) == ("new", "Мастер-классы")
+    assert svc.inserted[0][1]["status"]["privacyStatus"] == "unlisted"
+    youtube.add_to_playlist("new", "vid1", service=svc)
+    assert svc.inserted[1][1]["snippet"] == {"playlistId": "new",
+                                             "resourceId": {"kind": "youtube#video", "videoId": "vid1"}}
+
+
+def test_can_manage_needs_new_scope():
+    import json
+
+    from improv_video import youtube
+
+    class Store:
+        def __init__(self, raw):
+            self.raw = raw
+
+        def load(self):
+            return self.raw
+
+    assert not youtube.can_manage(Store(None))
+    assert not youtube.can_manage(Store(json.dumps({"scopes": [youtube.UPLOAD_SCOPE]})))  # вход до 0.1.21
+    assert youtube.can_manage(Store(json.dumps({"scopes": youtube.SCOPES})))
+
+
+def test_prepare_thumbnail_fits_youtube_limits(tmp_path):
+    import subprocess
+
+    from improv_video import youtube
+    from improv_video.probe import probe
+
+    src = tmp_path / "cover.png"
+    subprocess.run(["ffmpeg", "-loglevel", "error", "-f", "lavfi", "-i", "testsrc2=s=3000x1688", "-frames:v", "1",
+                    str(src)], check=True)
+    out = youtube.prepare_thumbnail(src, tmp_path / "thumb.jpg")
+    m = probe(out)
+    assert m.width == 1280 and out.stat().st_size <= youtube.THUMB_MAX_BYTES

@@ -50,7 +50,17 @@ class State:
         self._migrate()
 
     def _migrate(self) -> None:
+        day_cols = {r[1] for r in self.db.execute("PRAGMA table_info(days)")}
+        with self.db:
+            for col in ("playlist_id", "playlist_title"):  # плейлист дня (команда / мастер-классы)
+                if col not in day_cols:
+                    self.db.execute(f"ALTER TABLE days ADD COLUMN {col} TEXT")
         cols = {r[1] for r in self.db.execute("PRAGMA table_info(videos)")}
+        with self.db:
+            if "in_playlist" not in cols:  # id плейлиста, куда ролик уже добавлен
+                self.db.execute("ALTER TABLE videos ADD COLUMN in_playlist TEXT")
+            if "thumbnail" not in cols:  # подготовленная обложка, ждёт отправки на YouTube
+                self.db.execute("ALTER TABLE videos ADD COLUMN thumbnail TEXT")
         if "done_at" not in cols:
             # Ролики, переданные до появления автоудаления, считаются переданными сейчас
             with self.db:
@@ -105,6 +115,18 @@ class State:
             self.db.execute("UPDATE videos SET kind = ? WHERE day = ? AND status IN ('pending', 'built')",
                             (kind, day.isoformat()))
 
+    def set_day_playlist(self, day: date, playlist_id: str | None, playlist_title: str | None) -> None:
+        with self.db:
+            self.db.execute("INSERT INTO days (day, playlist_id, playlist_title) VALUES (?, ?, ?) "
+                            "ON CONFLICT(day) DO UPDATE SET playlist_id = excluded.playlist_id, "
+                            "playlist_title = excluded.playlist_title",
+                            (day.isoformat(), playlist_id, playlist_title))
+
+    def day_playlist(self, day: date) -> tuple[str, str] | None:
+        row = self.db.execute("SELECT playlist_id, playlist_title FROM days WHERE day = ?",
+                              (day.isoformat(),)).fetchone()
+        return (row["playlist_id"], row["playlist_title"] or "") if row and row["playlist_id"] else None
+
     def day_kind(self, day: date) -> str | None:
         row = self.db.execute("SELECT kind FROM days WHERE day = ?", (day.isoformat(),)).fetchone()
         return row["kind"] if row else None
@@ -130,7 +152,8 @@ class State:
         return video_id, part
 
     def update_video(self, video_id: int, **fields) -> None:
-        allowed = {"kind", "status", "file", "rec_start", "rec_end", "youtube_id", "privacy", "done_at"}
+        allowed = {"kind", "status", "file", "rec_start", "rec_end", "youtube_id", "privacy", "done_at",
+                   "in_playlist", "thumbnail"}
         if not fields or set(fields) - allowed:
             raise ValueError(f"Недопустимые поля: {set(fields) - allowed}")
         cols = ", ".join(f"{k} = ?" for k in fields)

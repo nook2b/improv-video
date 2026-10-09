@@ -152,10 +152,17 @@ def set_launch_at_login(enabled: bool) -> None:
 
 # ---------- окна по дизайну (improv_video.app.dialogs) ----------
 
-def ask_kind(day, meta: str = "", note: str = "", default: str = "training", timeout: float | None = None):
+def ask_kind(day, meta: str = "", note: str = "", default: str = "training", timeout: float | None = None,
+             playlists=None):
     from . import dialogs
 
-    return dialogs.ask_kind(dialogs.KindInfo(f"{day:%d.%m.%Y}", meta, note, default), timeout)
+    return dialogs.ask_kind(dialogs.KindInfo(f"{day:%d.%m.%Y}", meta, note, default, playlists), timeout)
+
+
+def ask_thumbnail(videos: list):
+    from . import dialogs
+
+    return dialogs.ask_thumbnail(dialogs.ThumbInfo(videos))
 
 
 def ask_first_run(clips: int, days: int):

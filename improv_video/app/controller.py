@@ -12,13 +12,15 @@ import shutil
 import threading
 import time
 from contextlib import contextmanager
+from dataclasses import dataclass
 from datetime import date, datetime
 from functools import partial
 from pathlib import Path
+from typing import Callable
 
 from .. import tools, youtube
 from ..naming import KINDS, title
-from ..pipeline import (NotEnoughSpace, VideoItem, build_pending, trash_done_videos, import_card, mark_existing_as_done,
+from ..pipeline import (NotEnoughSpace, VideoItem, build_pending, finish_uploaded, trash_done_videos, import_card, mark_existing_as_done,
                         new_clips_on_card, recent_videos, source_folders, upload_ready, video_metadata)
 from ..progress import DayProgress, minutes
 
@@ -40,6 +42,18 @@ RETRY_SECONDS = 30 * 60
 KIND_WAIT_SECONDS = 12 * 3600
 
 
+UNCHANGED = object()  # плейлист в окне «Что снимали?» не показывали — у дня не меняем
+
+
+@dataclass
+class PlaylistChoice:
+    """Для окна «Что снимали?»: плейлисты канала, последний выбор по типам, создание нового."""
+
+    playlists: list
+    by_kind: dict  # тип → [id, название] | None
+    create: Callable[[str], object]
+
+
 class Controller:
     def __init__(self, config: AppConfig, ui, *, config_path: Path | None = None,
                  token_store=None, volumes_dir: Path = Path("/Volumes")):
@@ -54,6 +68,7 @@ class Controller:
         self.note: tuple[str, str] | None = None  # «Новых клипов нет» и т. п. до извлечения флешки
         self.note_volume: Path | None = None
         self.signed_in = False
+        self.logins = 0
         self._local = threading.local()
         self.manual = []  # последние ролики для ручной загрузки: (название, описание, файл)
         self._queue: queue.Queue = queue.Queue()
@@ -304,16 +319,56 @@ class Controller:
                 self._say("improv-video", "Можно извлечь флешку")
 
     def _ask_kind(self, day: date, meta: str = "", note: str = "") -> None:
-        kind = self.ui.ask_kind(day, meta, note, self.config.last_kind, KIND_WAIT_SECONDS)
+        choice = None
+        if self.can_manage():
+            self.refresh_playlists()
+            choice = PlaylistChoice(self.playlists(), dict(self.config.kind_playlists), self.create_playlist)
+        answer = self.ui.ask_kind(day, meta, note, self.config.last_kind, KIND_WAIT_SECONDS, playlists=choice)
+        kind, playlist = answer if isinstance(answer, tuple) else (answer, UNCHANGED)
         if kind in KINDS:
-            self.set_kind(day, kind)
+            self.set_kind(day, kind, playlist)
 
-    def set_kind(self, day: date, kind: str) -> None:
+    # ---------- плейлисты ----------
+
+    def can_manage(self) -> bool:
+        """Вход в YouTube с доступом к плейлистам и обложкам."""
+        try:
+            return youtube.can_manage(self.tokens)
+        except Exception:  # noqa: BLE001 — связка ключей недоступна
+            return False
+
+    def playlists(self) -> list[youtube.Playlist]:
+        return [youtube.Playlist(i, t) for i, t in self.config.playlists]
+
+    def refresh_playlists(self) -> list[youtube.Playlist]:
+        """Список плейлистов канала; без сети — тот, что был в прошлый раз."""
+        try:
+            fresh = youtube.list_playlists(youtube.credentials(self.tokens))
+        except Exception as e:  # noqa: BLE001
+            log.warning("Плейлисты не обновились: %s", e)
+            return self.playlists()
+        self.config.playlists = [[p.id, p.title] for p in fresh]
+        self._save_config()
+        return fresh
+
+    def create_playlist(self, name: str) -> youtube.Playlist:
+        p = youtube.create_playlist(name, youtube.credentials(self.tokens))
+        self.config.playlists = sorted(self.config.playlists + [[p.id, p.title]], key=lambda x: x[1].lower())
+        self._save_config()
+        log.info("Создан плейлист «%s»", p.title)
+        return p
+
+    def set_kind(self, day: date, kind: str, playlist=None) -> None:
         """Ответ на «Что снимали?» записывается сразу, а не в очередь: там может часами идти сборка
-        других дней. Выдача ролика (окно «Ролик готов» или загрузка) — в очередь, когда дойдёт."""
+        других дней. Выдача ролика (окно «Ролик готов» или загрузка) — в очередь, когда дойдёт.
+        playlist: Playlist, None — без плейлиста, UNCHANGED — не спрашивали."""
         with self._own_state() as state:
             state.set_day_kind(day, kind)
+            if playlist is not UNCHANGED:
+                state.set_day_playlist(day, playlist.id if playlist else None, playlist.title if playlist else None)
         self.config.last_kind = kind
+        if playlist is not UNCHANGED:
+            self.config.kind_playlists[kind] = [playlist.id, playlist.title] if playlist else None
         self._save_config()
         progress = self.progress
         if progress is not None and progress.day == day:
@@ -355,22 +410,54 @@ class Controller:
 
     def _deliver_ready(self, state: State) -> None:
         ready = [r for r in state.videos("built") if r["kind"]]
-        if not ready:
-            return
         if self.config.upload_mode == "api":
-            creds = youtube.credentials(self.tokens)
-            try:
-                upload_ready(state, self.config.settings(),
-                             partial(youtube.upload, creds=creds, privacy="unlisted"), self._progress_upload,
-                             on_progress=self.uploading.__setitem__)
-            finally:
-                self.uploading.clear()
+            if ready:
+                creds = youtube.credentials(self.tokens)
+                try:
+                    upload_ready(state, self.config.settings(),
+                                 partial(youtube.upload, creds=creds, privacy="unlisted"), self._progress_upload,
+                                 on_progress=self.uploading.__setitem__)
+                finally:
+                    self.uploading.clear()
+            self._finish_uploaded(state)
+            return
+        if not ready:
             return
         for row in ready:
             name, desc, _ = video_metadata(row)
             state.update_video(row["id"], status="manual")
             self.manual = ([(name, desc, Path(row["file"]))] + self.manual)[:10]
             self._spawn(self._hand_off, name, desc, Path(row["file"]), row["id"])
+
+    def _finish_uploaded(self, state: State) -> None:
+        """Загруженные — в плейлист дня, ждущие обложки — на YouTube (нужен вход с доступом к ним)."""
+        pending = [r for r in state.videos("uploaded") if r["thumbnail"] or (
+            r["in_playlist"] is None and state.day_playlist(date.fromisoformat(r["day"])))]
+        if not pending:
+            return
+        if not self.can_manage():
+            log.info("Плейлист и обложка ждут входа в YouTube с доступом к ним")
+            return
+        creds = youtube.credentials(self.tokens)
+        finish_uploaded(state, partial(youtube.add_to_playlist, creds=creds),
+                        partial(youtube.set_thumbnail, creds=creds), self._progress_upload)
+
+    def uploaded_videos(self) -> list[tuple[int, str]]:
+        """Ролики на YouTube (новые сверху) — для окна «Обложка»."""
+        with self._own_state() as state:
+            rows = [r for r in state.videos("uploaded") if r["youtube_id"]]
+        return [(r["id"], video_metadata(r)[0]) for r in reversed(rows)]
+
+    def set_thumbnail(self, video_id: int, image: Path) -> None:
+        """Обложка из картинки: сжимается до требований YouTube и уходит при ближайшей выдаче."""
+        with self._own_state() as state:
+            row = state.video(video_id)
+            folder = Path(self.config.archive).expanduser() / row["day"]
+            folder.mkdir(parents=True, exist_ok=True)
+            thumb = youtube.prepare_thumbnail(Path(image), folder / f"thumbnail_{video_id}.jpg")
+            state.update_video(video_id, thumbnail=str(thumb))
+        log.info("Обложка для ролика %s: %s", video_id, image)
+        self.deliver()
 
     def _progress_upload(self, text: str) -> None:
         self._progress(text)
@@ -443,6 +530,7 @@ class Controller:
         self.status = "Вход в YouTube: продолжите в браузере"
         youtube.login(secrets, self.tokens)
         self.signed_in = True
+        self.logins += 1  # меню перечитает, с каким доступом вход
         self._say("YouTube", "Вход сохранён")
 
     def _do_logout(self) -> None:

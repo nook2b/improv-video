@@ -25,11 +25,15 @@ class FakeUI:
         answer = self.dialog(f"На карте {clips} клипов за {days} дн. — первый запуск", [])
         return {"Обработать все": "all", "Считать обработанными": "skip"}.get(answer)
 
-    def ask_kind(self, day, meta="", note="", default="training", timeout=None):
+    def ask_kind(self, day, meta="", note="", default="training", timeout=None, playlists=None):
         answer = self.dialog(f"Что снимали {day:%d.%m.%Y}? {meta}", [])
         from improv_video.naming import KINDS
 
-        return {label: key for key, label in KINDS.items()}.get(answer)
+        kind = {label: key for key, label in KINDS.items()}.get(answer)
+        self.playlist_choice = playlists
+        if playlists is not None and kind and hasattr(self, "pick_playlist"):
+            return kind, self.pick_playlist(playlists, kind)
+        return kind
 
     def show_ready(self, name, desc, file):
         with self.lock:
@@ -323,3 +327,49 @@ def test_test_upload_reports_what_youtube_set(tmp_path, monkeypatch):
         c.wait_idle()
     c.stop()
     assert "ограничения нет" in asked[0] and "пока ограничены" in asked[1]
+
+
+
+def test_playlist_chosen_in_kind_dialog_and_video_added_after_upload(card, tmp_path, monkeypatch):
+    import json
+    from datetime import date
+
+    from improv_video import youtube
+    from improv_video.state import State
+
+    monkeypatch.setattr("improv_video.app.config.AppConfig.settings", _fast_settings(AppConfig.settings))
+    added, uploads = [], []
+    monkeypatch.setattr(youtube, "credentials", lambda store: object())
+    channel = [youtube.Playlist("PLa", "Команда А")]  # плейлисты канала, как их вернёт YouTube
+    monkeypatch.setattr(youtube, "list_playlists", lambda creds: list(channel))
+    monkeypatch.setattr(youtube, "create_playlist", lambda name, creds: channel.append(youtube.Playlist("PLm", name))
+                        or channel[-1])
+    monkeypatch.setattr(youtube, "add_to_playlist", lambda pl, vid, creds: added.append((pl, vid)))
+    monkeypatch.setattr(youtube, "upload", lambda *a, **kw: uploads.append(1)
+                        or youtube.UploadResult(f"yt{len(uploads)}", "unlisted"))
+
+    class Tokens:
+        def load(self):
+            return json.dumps({"scopes": youtube.SCOPES})
+
+    ui = FakeUI({"первый запуск": "Обработать все", "01.10.2026": "Шоу", "03.10.2026": "Мастер-класс"})
+    # Шоу — в «Команду А» из списка канала, мастер-класс — в новый плейлист из того же окна
+    ui.pick_playlist = lambda choice, kind: (choice.create("Мастер-классы") if kind == "masterclass"
+                                             else choice.playlists[0])
+    config = AppConfig(archive=str(tmp_path / "Footage"), lut="", denoise="weak", upload_mode="api")
+    c = Controller(config, ui, config_path=tmp_path / "config.json", volumes_dir=tmp_path / "Volumes",
+                   token_store=Tokens())
+    c.start(watch=False)
+    c.submit("source", card)
+    c.wait_idle(300)
+    c.stop()
+
+    state = State(tmp_path / "Footage" / "state.sqlite")
+    assert state.day_playlist(date(2026, 10, 1)) == ("PLa", "Команда А")
+    assert state.day_playlist(date(2026, 10, 3)) == ("PLm", "Мастер-классы")
+    assert sorted(added) == [("PLa", r["youtube_id"]) for r in state.videos("uploaded") if r["day"] == "2026-10-01"] \
+        + [("PLm", r["youtube_id"]) for r in state.videos("uploaded") if r["day"] == "2026-10-03"]
+    assert all(r["in_playlist"] for r in state.videos("uploaded"))
+    saved = AppConfig.load(tmp_path / "config.json")
+    assert saved.kind_playlists == {"show": ["PLa", "Команда А"], "masterclass": ["PLm", "Мастер-классы"]}
+    assert ["PLm", "Мастер-классы"] in saved.playlists  # новый плейлист — в списке для следующего окна

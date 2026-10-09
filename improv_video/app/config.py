@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import json
-from dataclasses import asdict, dataclass, fields
+import threading
+from dataclasses import asdict, dataclass, field, fields
 from pathlib import Path
 
 from ..pipeline import Settings
 from ..tools import resources_dir
 
+_SAVE_LOCK = threading.Lock()
 SUPPORT_DIR = Path.home() / "Library" / "Application Support" / "improv-video"
 LOG_FILE = Path.home() / "Library" / "Logs" / "improv-video.log"
 
@@ -26,6 +28,8 @@ class AppConfig:
     # api — после аудита: загрузка «по ссылке» сама.
     upload_mode: str = "manual"
     last_kind: str = "training"
+    playlists: list = field(default_factory=list)  # плейлисты канала [[id, название]] — с прошлой проверки
+    kind_playlists: dict = field(default_factory=dict)  # тип → [id, название]: последний выбранный для типа
     channel_name: str = "Иван improv"  # подпись в подменю YouTube
     delete_after_days: int = 3  # файл ролика — в Корзину через столько дней после «Готово» или загрузки; 0 — не удалять
     auto_update: bool = True  # новые версии из релизов GitHub ставятся сами, когда ничего не обрабатывается
@@ -44,9 +48,10 @@ class AppConfig:
     def save(self, path: Path | None = None) -> None:
         path = path or SUPPORT_DIR / "config.json"
         path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = path.with_suffix(".tmp")
-        tmp.write_text(json.dumps(asdict(self), ensure_ascii=False, indent=2), encoding="utf-8")
-        tmp.replace(path)
+        with _SAVE_LOCK:  # сохраняют и меню, и окна в своих потоках — по одному
+            tmp = path.with_suffix(".tmp")
+            tmp.write_text(json.dumps(asdict(self), ensure_ascii=False, indent=2), encoding="utf-8")
+            tmp.replace(path)
 
     def settings(self) -> Settings:
         return Settings(
