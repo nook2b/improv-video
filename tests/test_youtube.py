@@ -73,3 +73,14 @@ def test_needs_login_without_token():
 
     with pytest.raises(youtube.NeedsLogin):
         youtube.credentials(Empty())
+
+
+def test_upload_is_unlisted_and_not_made_for_kids():
+    from datetime import datetime
+
+    from improv_video.youtube import request_body
+
+    body = request_body("Шоу 08.10.2026", "Снято 08.10.2026, 18:05–20:40", datetime(2026, 10, 8, 18, 5))
+    assert body["status"]["selfDeclaredMadeForKids"] is False  # «Нет, это видео не для детей»
+    assert body["status"]["privacyStatus"] == "unlisted"
+    assert body["snippet"]["title"] == "Шоу 08.10.2026"
