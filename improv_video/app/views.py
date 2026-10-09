@@ -284,6 +284,13 @@ class StatusView(NSView):
                 draw_line("Не вынимайте флешку", x0 + 20, y, 16, font(12, 500), primary)
                 draw_line("идёт чтение", 0, y, 16, font(12), tertiary, right=x0 + w)
             y += 16
+        if p.queued:  # вторая флешка вставлена во время сборки — её очередь после этой
+            y += 6 if p.reading_card else 10
+            if draw:
+                status_dot(x0 + 6, y + 8, "idle", dark)
+                draw_line(f"В очереди: {p.queued}", x0 + 20, y, 16, font(12, 500), primary)
+                draw_line("после этой", 0, y, 16, font(12), tertiary, right=x0 + w)
+            y += 16
         return y + 10
 
     @objc.python_method
@@ -482,7 +489,7 @@ def demo_models():
     stages = [mm.StageRow("Замер и автоцвет", "done", 1.0, "3 мин"), mm.StageRow("Кодирование", "active", 0.61, "61%"),
               mm.StageRow("Звук", "pending"), mm.StageRow("Склейка", "pending")]
     work = mm.ProgressBlock("Тренировка 06.10.2026", "· день 1 из 2", 0.42, "42%", "осталось ~18 мин", False,
-                            stages, reading_card=True)
+                            stages, reading_card=True, queued="флешка «HotBaby»")
     stalled_stages = [mm.StageRow(s.title, s.state, s.fraction, s.right, s.state == "active") for s in stages]
     stalled = mm.ProgressBlock("Тренировка 06.10.2026", "· день 1 из 2", 0.42, "42%", "без изменений 3 мин", True,
                                stalled_stages, reading_card=True)

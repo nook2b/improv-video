@@ -373,3 +373,34 @@ def test_playlist_chosen_in_kind_dialog_and_video_added_after_upload(card, tmp_p
     saved = AppConfig.load(tmp_path / "config.json")
     assert saved.kind_playlists == {"show": ["PLa", "Команда А"], "masterclass": ["PLm", "Мастер-классы"]}
     assert ["PLm", "Мастер-классы"] in saved.playlists  # новый плейлист — в списке для следующего окна
+
+
+def test_card_inserted_during_processing_is_announced(card, tmp_path):
+    import shutil
+    import time
+
+    ui = FakeUI({"первый запуск": "Считать обработанными"})
+    volumes = tmp_path / "Volumes"
+    volumes.mkdir()
+    config = AppConfig(archive=str(tmp_path / "Footage"), lut="", denoise="weak")
+    c = Controller(config, ui, config_path=tmp_path / "config.json", volumes_dir=volumes)
+    c.status = "Сборка другой флешки"  # занято
+    c.start(watch=True)
+    shutil.copytree(card, volumes / "HotBaby")
+    end = time.monotonic() + 15
+    while not any("HotBaby" in t for _, t in ui.notes) and time.monotonic() < end:
+        time.sleep(0.1)
+    c.stop()
+    assert ("improv-video", "Флешка «HotBaby» найдена — обработаю после текущей") in ui.notes
+
+
+def test_queued_card_shown_in_menu():
+    from improv_video.app import menu_model as mm
+    from improv_video.progress import DayProgress
+
+    p = DayProgress("Тренировка 06.10.2026")
+    p.start("encode")
+    block = mm.status_block(progress=p, status="", busy=True, note=None, videos=[], queued=["HotBaby"])
+    assert block.progress.queued == "флешка «HotBaby»"
+    busy = mm.status_block(progress=None, status="Импорт", busy=True, note=None, videos=[], queued=["A", "B"])
+    assert busy.subtitle == "В очереди: флешки «A», «B»"

@@ -67,6 +67,54 @@ class KeyringStore:
             pass
 
 
+class FileTokenStore:
+    """Токен в файле, читать и писать его может только ваша учётная запись (права 600).
+
+    Не в связке ключей: приложение подписано без сертификата Apple, у каждой версии подпись своя,
+    и macOS после каждого обновления спрашивала пароль от Mac, чтобы отдать токен. Вход, сохранённый
+    раньше в связке ключей, переезжает сюда при первом чтении (macOS спросит пароль последний раз).
+    """
+
+    def __init__(self, path: Path, legacy: TokenStore | None = None):
+        self.path, self.legacy = Path(path), legacy
+
+    def load(self) -> str | None:
+        if self.path.exists():
+            return self.path.read_text(encoding="utf-8") or None
+        if self.legacy is None:
+            return None
+        try:
+            data = self.legacy.load()
+        except Exception:  # noqa: BLE001 — связка ключей недоступна или пароль не ввели
+            return None
+        if data:
+            self.save(data)
+            try:
+                self.legacy.clear()
+            except Exception:  # noqa: BLE001
+                pass
+        return data
+
+    def save(self, data: str) -> None:
+        import os
+
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = self.path.with_suffix(".tmp")
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(data)
+        os.chmod(tmp, 0o600)
+        tmp.replace(self.path)
+
+    def clear(self) -> None:
+        self.path.unlink(missing_ok=True)
+        if self.legacy is not None:
+            try:
+                self.legacy.clear()
+            except Exception:  # noqa: BLE001
+                pass
+
+
 def login(client_secrets: Path, store: TokenStore):
     """Открывает браузер для входа в Google и сохраняет токен."""
     from google_auth_oauthlib.flow import InstalledAppFlow

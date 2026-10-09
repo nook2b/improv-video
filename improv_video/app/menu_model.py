@@ -32,6 +32,7 @@ class ProgressBlock:
     stalled: bool
     stages: list[StageRow] = field(default_factory=list)
     reading_card: bool = False
+    queued: str = ""  # «флешка HotBaby» — ждёт, пока соберётся эта
 
 
 @dataclass
@@ -68,7 +69,11 @@ def _plural(n: int, one: str, few: str, many: str) -> str:
     return many
 
 
-def progress_block(p: DayProgress) -> ProgressBlock:
+def queued_text(queued: list[str]) -> str:
+    return ("флешка " if len(queued) == 1 else "флешки ") + ", ".join(f"«{n}»" for n in queued) if queued else ""
+
+
+def progress_block(p: DayProgress, queued: list[str] | None = None) -> ProgressBlock:
     stalled = p.stalled_for()
     eta = p.eta_seconds()
     if stalled:
@@ -90,6 +95,7 @@ def progress_block(p: DayProgress) -> ProgressBlock:
         stalled=bool(stalled),
         stages=rows,
         reading_card=p.reading_card,
+        queued=queued_text(queued or []),
     )
 
 
@@ -143,11 +149,13 @@ def update_notice(current: str, u: UpdateState, now: datetime) -> tuple[StatusBl
 
 
 def status_block(*, progress: DayProgress | None, status: str, busy: bool, note: tuple[str, str] | None,
-                 videos: list[VideoItem], update: tuple[StatusBlock, bool] | None = None) -> StatusBlock:
+                 videos: list[VideoItem], update: tuple[StatusBlock, bool] | None = None,
+                 queued: list[str] | None = None) -> StatusBlock:
     if progress is not None:
-        return StatusBlock(tone=ACTIVE, progress=progress_block(progress))
+        return StatusBlock(tone=ACTIVE, progress=progress_block(progress, queued))
     if busy:
-        return StatusBlock(tone=ACTIVE, title=status)
+        wait = queued_text(queued or [])
+        return StatusBlock(tone=ACTIVE, title=status, subtitle=f"В очереди: {wait}" if wait else "")
     if note:
         return StatusBlock(tone=SUCCESS, icon="circle-check", title=note[0], subtitle=note[1])
     if update and update[1]:

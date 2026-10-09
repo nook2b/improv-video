@@ -280,7 +280,8 @@ class MenuBarApp(rumps.App):
             videos = []
         busy = c.busy
         model = mm.status_block(progress=c.progress, status=c.status, busy=busy, note=c.note, videos=videos,
-                                update=mm.update_notice(__version__, self.update_state, datetime.now()))
+                                update=mm.update_notice(__version__, self.update_state, datetime.now()),
+                                queued=list(c.queued))
         version_text = mm.update_line(__version__, self.update_state)
         if version_text != self._version_text:
             self._version_text = version_text

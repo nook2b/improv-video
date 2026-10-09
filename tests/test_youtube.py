@@ -166,3 +166,34 @@ def test_prepare_thumbnail_fits_youtube_limits(tmp_path):
     out = youtube.prepare_thumbnail(src, tmp_path / "thumb.jpg")
     m = probe(out)
     assert m.width == 1280 and out.stat().st_size <= youtube.THUMB_MAX_BYTES
+
+
+def test_file_token_store_moves_token_out_of_keychain(tmp_path):
+    import stat
+
+    from improv_video.youtube import FileTokenStore
+
+    class Keychain:
+        def __init__(self):
+            self.data, self.reads = '{"token": "t"}', 0
+
+        def load(self):
+            self.reads += 1
+            return self.data
+
+        def save(self, data):
+            self.data = data
+
+        def clear(self):
+            self.data = None
+
+    keychain = Keychain()
+    store = FileTokenStore(tmp_path / "support" / "youtube-token.json", keychain)
+    assert store.load() == '{"token": "t"}'  # из связки ключей — последний раз
+    assert keychain.data is None and keychain.reads == 1
+    assert store.load() == '{"token": "t"}' and keychain.reads == 1  # дальше — только файл, без пароля
+    assert stat.S_IMODE(store.path.stat().st_mode) == 0o600
+    store.save('{"token": "u"}')
+    assert store.load() == '{"token": "u"}' and stat.S_IMODE(store.path.stat().st_mode) == 0o600
+    store.clear()
+    assert store.load() is None and not store.path.exists()

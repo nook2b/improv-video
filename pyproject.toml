@@ -1,6 +1,6 @@
 [project]
 name = "improv-video"
-version = "0.1.22"
+version = "0.1.23"
 description = "Insta360 Ace Pro 2 → YouTube: автоматическая склейка и загрузка роликов"
 requires-python = ">=3.11"
 dependencies = [

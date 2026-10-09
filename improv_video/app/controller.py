@@ -60,7 +60,7 @@ class Controller:
         self.config = config
         self.config_path = config_path
         self.ui = ui
-        self.tokens = token_store or youtube.KeyringStore()
+        self.tokens = token_store or youtube.FileTokenStore(SUPPORT_DIR / "youtube-token.json", youtube.KeyringStore())
         self.volumes_dir = volumes_dir
         self._status = IDLE
         self.progress: DayProgress | None = None  # сборка дня — для блока прогресса в меню
@@ -69,6 +69,7 @@ class Controller:
         self.note_volume: Path | None = None
         self.signed_in = False
         self.logins = 0
+        self.queued: list[str] = []  # флешки, вставленные во время обработки: ждут своей очереди
         self._local = threading.local()
         self.manual = []  # последние ролики для ручной загрузки: (название, описание, файл)
         self._queue: queue.Queue = queue.Queue()
@@ -234,6 +235,10 @@ class Controller:
                 path = self.volumes_dir / name
                 try:
                     if source_folders(path) and (path / "DCIM").is_dir():
+                        if self.busy:  # идёт другая флешка: эта — следом, и сказать об этом сразу
+                            self.queued.append(name)
+                            log.info("Флешка «%s» вставлена во время обработки — в очереди", name)
+                            self.ui.notify("improv-video", f"Флешка «{name}» найдена — обработаю после текущей")
                         self.submit("source", path)
                 except OSError:
                     pass
@@ -262,6 +267,8 @@ class Controller:
 
     def _do_source(self, path: Path) -> None:
         """Флешка или папка с клипами."""
+        if path.name in self.queued:
+            self.queued.remove(path.name)
         settings = self.config.settings()
         self.note, self.note_volume = None, None
         clips = new_clips_on_card(path, self.state)
