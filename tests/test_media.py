@@ -154,3 +154,15 @@ def test_broken_clip_is_skipped_not_whole_card(tmp_path, settings):
     assert [names for names in days.values()] == [["VID_20261001_180500_00_001.mp4"]]
     assert any(n.startswith("Повреждён и пропущен: VID_20260719_194558_00_578.mp4") for n in notes)
     assert import_card(card, state, settings, notify=notes.append) == {}  # второй раз не спотыкается
+
+
+def test_archive_on_camera_card_is_detected(tmp_path):
+    from improv_video.pipeline import is_camera_card
+
+    volumes = tmp_path / "Volumes"
+    (volumes / "HotBaby" / "DCIM" / "Camera01").mkdir(parents=True)
+    (volumes / "Backup" / "improv").mkdir(parents=True)
+    assert is_camera_card(volumes / "HotBaby" / "DCIM" / "Camera01", volumes)
+    assert is_camera_card(volumes / "HotBaby", volumes)
+    assert not is_camera_card(volumes / "Backup" / "improv", volumes)  # внешний диск без DCIM — можно
+    assert not is_camera_card(tmp_path / "Movies", volumes)

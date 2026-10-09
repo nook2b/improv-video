@@ -36,6 +36,7 @@ from .. import __version__
 from . import macos, updater, views
 from . import menu_model as mm
 from .config import LOG_FILE, SUPPORT_DIR, AppConfig
+from ..pipeline import is_camera_card
 from .controller import Controller
 
 TAB = 236  # где кончаются значения справа («1080p», «не вошли») перед стрелкой подменю
@@ -410,18 +411,26 @@ class MenuBarApp(rumps.App):
 
     def _check_update(self, manual: bool) -> None:
         log = logging.getLogger("improv-video")
-        if updater.current_bundle() is None:
+
+        def tell(text: str) -> None:
+            """Ручная проверка отвечает окном: уведомления macOS может молча не показать."""
+            log.info("Проверка обновлений: %s", text)
             if manual:
-                macos.notify("improv-video", "Обновление работает только в собранном приложении")
+                threading.Thread(target=macos.dialog, args=(text, ["OK"]), daemon=True).start()
+
+        if updater.current_bundle() is None:
+            tell("Обновление работает только в собранном приложении")
             return
         try:
             release = updater.latest()
             if release is None or not updater.is_newer(release.version, __version__):
-                if manual:
-                    macos.notify("improv-video", f"У вас последняя версия {__version__}")
+                tell(f"У вас последняя версия: {__version__}")
                 return
             if self._pending_update and self._pending_update[0] == release.version:
+                tell(f"Версия {release.version} уже скачана и поставится, когда закончится обработка")
                 return
+            tell(f"Нашлась версия {release.version} (у вас {__version__}). Скачиваю — приложение "
+                 "перезапустится само" + (", когда закончится обработка" if self.controller.busy else ""))
             log.info("Обновление: скачиваю %s", release.version)
             app = updater.prepare(release, SUPPORT_DIR / "update")
             self._pending_update = (release.version, app)
@@ -431,7 +440,8 @@ class MenuBarApp(rumps.App):
         except Exception as e:  # noqa: BLE001 — нет сети, GitHub недоступен: попробуем в следующий раз
             log.warning("Обновление не удалось: %s", e)
             if manual:
-                macos.notify("improv-video", f"Не удалось проверить обновления: {str(e)[:120]}")
+                threading.Thread(target=macos.dialog, args=(f"Не удалось проверить обновления: {str(e)[:200]}",
+                                                            ["OK"]), daemon=True).start()
 
     def _install_update(self) -> None:
         version, app = self._pending_update
@@ -488,6 +498,11 @@ class MenuBarApp(rumps.App):
     @_in_thread
     def choose_archive(self, _):
         folder = macos.choose_folder("Папка архива (лучше на внешнем диске)")
+        if folder and is_camera_card(folder):
+            macos.dialog(f"«{folder}» — это карта камеры. На неё нельзя складывать ролики: на карте почти "
+                         "нет места, и сборка, читая и записывая одну карту, идёт очень медленно. "
+                         "Выберите папку на Mac или внешнем диске.", ["OK"])
+            return
         if folder:
             self.config.archive = str(folder)
             self.config.save()
@@ -551,6 +566,13 @@ def main() -> None:
     logging.basicConfig(filename=LOG_FILE, level=logging.INFO,
                         format="%(asctime)s %(levelname)s %(message)s")
     config = AppConfig.load()
+    if is_camera_card(Path(config.archive).expanduser()):
+        # Архив на карте камеры: места нет, сборка медленная — назад в папку по умолчанию на Mac
+        logging.getLogger("improv-video").warning("Папка архива была на карте камеры (%s) — вернул %s",
+                                                  config.archive, AppConfig.archive)
+        macos.notify("improv-video", "Папка архива была на карте камеры — вернул её в «Фильмы»")
+        config.archive = AppConfig.archive
+        config.save()
     logging.getLogger("improv-video").info(
         "improv-video %s: архив %s, копировать клипы: %s, качество %sp",
         __version__, config.archive, "да" if config.copy_clips else "нет", config.max_height)

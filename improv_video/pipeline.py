@@ -101,10 +101,21 @@ def free_bytes(folder: Path) -> int:
     return shutil.disk_usage(folder).free
 
 
+def is_camera_card(folder: Path, volumes: Path = Path("/Volumes")) -> bool:
+    """Папка на подключённом томе, где есть DCIM, — карта камеры (туда нельзя класть архив)."""
+    try:
+        rel = Path(folder).resolve().relative_to(volumes.resolve())
+    except ValueError:
+        return False
+    return bool(rel.parts) and (volumes / rel.parts[0] / "DCIM").is_dir()
+
+
 def _check_space(folder: Path, need: int, what: str) -> None:
     free = free_bytes(folder)
     if free < need:
-        raise NotEnoughSpace(f"{what}: нужно {need / GB:.0f} ГБ, свободно {free / GB:.0f} ГБ")
+        parts = Path(folder).resolve().parts
+        disk = f"«{parts[2]}»" if len(parts) >= 3 and parts[1] == "Volumes" else "Mac"
+        raise NotEnoughSpace(f"{what}: нужно {need / GB:.0f} ГБ, свободно {free / GB:.0f} ГБ на диске {disk}")
 
 
 def source_folders(path: Path) -> list[Path]:
