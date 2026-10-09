@@ -481,6 +481,7 @@ def thumb_painter(info: ThumbInfo):
         if draw:  # место для картинки: перетащить сюда или «Выбрать файл…»
             over = c.state.get("drag_over") or c.hover == "pick"
             fill_round(x0 - 1, y - 1, w + 2, zone_h + 2, 13, color("accent", dark) if over else _rgba(BORDER_STRONG[dark]))
+            fill_round(x0, y, w, zone_h, 12, _rgba(WINDOW[dark]))  # заливки ниже полупрозрачные — не поверх рамки
             fill_round(x0, y, w, zone_h, 12, _rgba(ACCENT_SOFT[dark]) if over else color("bg-field", dark))
             image = c.state.get("image")
             if image:

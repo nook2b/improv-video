@@ -18,7 +18,7 @@ app = BUNDLE(
     icon="icon/AppIcon.icns",  # из icon/source.png: python packaging/icon/make_icon.py
     info_plist={
         "LSUIElement": True,  # только иконка в менюбаре, без Dock
-        "CFBundleShortVersionString": "0.1.21",
+        "CFBundleShortVersionString": "0.1.22",
         "LSMinimumSystemVersion": "13.0",
         "NSRemovableVolumesUsageDescription": "improv-video копирует клипы с карты камеры.",
     },
