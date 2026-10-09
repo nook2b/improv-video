@@ -181,8 +181,8 @@ def import_card(volume: Path, state: State, settings: Settings, notify: Notify =
             broken.append(c)
             state.add_clip(c.name, c.size, shooting_day(c.start, settings.day_start), status="broken")
     if broken:
-        notify(f"Повреждён и пропущен: {', '.join(c.name for c in broken)} — запись, видимо, оборвалась; "
-               "остальные клипы обрабатываются")
+        names = ", ".join(c.name for c in broken)
+        notify(f"Повреждённый клип пропущен: {names}. Похоже, запись оборвалась. Остальные клипы обрабатываются")
     clips = [p.clip for p in parts]
     if not clips:
         return {}
@@ -515,7 +515,10 @@ def upload_ready(state: State, settings: Settings, uploader: Callable[..., "obje
         state.update_video(row["id"], status="uploaded", youtube_id=result.video_id, privacy=result.privacy,
                            done_at=datetime.now().isoformat(timespec="seconds"))
         if result.privacy != "unlisted":
-            notify(f"«{name}» загружено как {result.privacy}: YouTube ограничил доступ до аудита API — {result.url}")
+            from .youtube import PRIVACY_RU
+
+            notify(f"«{name}» загружено, но YouTube поставил «{PRIVACY_RU.get(result.privacy, result.privacy)}» "
+                   f"вместо «Доступ по ссылке»: {result.url}")
         else:
             notify(f"«{name}» загружено: {result.url}")
         done.append(row["id"])

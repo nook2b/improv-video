@@ -152,7 +152,7 @@ def test_broken_clip_is_skipped_not_whole_card(tmp_path, settings):
     notes = []
     days = import_card(card, state, settings, notify=notes.append)
     assert [names for names in days.values()] == [["VID_20261001_180500_00_001.mp4"]]
-    assert any(n.startswith("Повреждён и пропущен: VID_20260719_194558_00_578.mp4") for n in notes)
+    assert any(n.startswith("Повреждённый клип пропущен: VID_20260719_194558_00_578.mp4") for n in notes)
     assert import_card(card, state, settings, notify=notes.append) == {}  # второй раз не спотыкается
 
 

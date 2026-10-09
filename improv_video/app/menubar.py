@@ -174,9 +174,8 @@ class MenuBarApp(rumps.App):
         self.mode_api = rumps.MenuItem("Автоматически «по ссылке»", callback=self._set_mode("api"))
         m.add(self.mode_manual)
         m.add(self.mode_api)
-        _raw(m, _note("«Проверить загрузку…» покажет, ставит ли YouTube «по ссылке»"))
         m.add(rumps.separator)
-        self.test_item = rumps.MenuItem("Проверить загрузку…", callback=self.test_upload)
+        self.test_item = rumps.MenuItem("Пробная загрузка…", callback=self.test_upload)
         m.add(self.test_item)
         self.thumb_item = rumps.MenuItem("Поставить обложку…", callback=self.set_thumbnail)
         m.add(self.thumb_item)
@@ -223,7 +222,7 @@ class MenuBarApp(rumps.App):
             item = rumps.MenuItem(label, callback=self._set_delete_days(days))
             self.delete_menu.add(item)
             self.delete_items[days] = item
-        _raw(self.delete_menu, _note("Файл — в Корзину; дни от «Готово» или загрузки"))
+        _raw(self.delete_menu, _note("Файл ролика уходит в Корзину после загрузки на YouTube"))
         m.add(self.delete_menu)
         self.auto_update_item = rumps.MenuItem("Обновлять автоматически", callback=self.toggle_auto_update)
         m.add(self.auto_update_item)
@@ -239,7 +238,7 @@ class MenuBarApp(rumps.App):
         _set_title(self.youtube_menu, "YouTube", mm.youtube_value(signed, cfg.upload_mode))
         _set_title(self.processing_menu, "Обработка", mm.quality_value(cfg.max_height))
         self._old_login = signed and not self.controller.can_manage()  # вход до плейлистов и обложек
-        self.login_item.title = ("Войти заново — для плейлистов и обложек…" if self._old_login
+        self.login_item.title = ("Войти заново…" if self._old_login
                                  else "Выйти" if signed else "Войти…")
         if self.account_view.signed_in != signed:
             self.account_view.signed_in = signed
@@ -344,7 +343,7 @@ class MenuBarApp(rumps.App):
         m.add(rumps.separator)
         note = NSMenuItem.alloc().init()
         note.setView_(views.note_view(
-            None, "Последние 10 роликов · не собранный день повторится при следующей вставке флешки",
+            None, "Последние 10 роликов. Несобранный день соберётся при следующей вставке флешки",
             views.VIDEOS_WIDTH, (28, 3, 4)))
         _raw(m, note)
 
@@ -505,13 +504,13 @@ class MenuBarApp(rumps.App):
 
     @_in_thread
     def process_folder(self, _):
-        folder = macos.choose_folder("Папка с клипами VID_*.mp4 (или карта камеры)")
+        folder = macos.choose_folder("Выберите папку с видео с камеры")
         if folder:
             self.controller.submit("source", folder)
 
     @_in_thread
     def test_upload(self, _):
-        file = macos.choose_file("Короткое видео для проверки загрузки (загрузится «по ссылке»)", ["mp4", "mov"])
+        file = macos.choose_file("Короткое видео для пробной загрузки", ["mp4", "mov"])
         if file:
             self.controller.submit("test_upload", file)
 
@@ -519,13 +518,13 @@ class MenuBarApp(rumps.App):
     def set_thumbnail(self, _):
         c = self.controller
         if not c.can_manage():
-            macos.dialog("Для обложек и плейлистов нужен вход в YouTube с новым доступом: "
-                         "YouTube → Выйти, затем «Войти…».", ["OK"])
+            macos.dialog("Чтобы ставить обложки, войдите в YouTube заново: меню YouTube → «Войти заново…».",
+                         ["OK"])
             return
         videos = c.uploaded_videos()
         if not videos:
-            macos.dialog("Обложку можно поставить ролику, загруженному через приложение "
-                         "(YouTube → Автоматически «по ссылке»).", ["OK"])
+            macos.dialog("Пока нет роликов, загруженных на YouTube из improv-video. Обложку можно поставить "
+                         "после загрузки.", ["OK"])
             return
         answer = macos.ask_thumbnail(videos)
         if not answer:
@@ -618,7 +617,7 @@ def main() -> None:
         # Архив на карте камеры: места нет, сборка медленная — назад в папку по умолчанию на Mac
         logging.getLogger("improv-video").warning("Папка архива была на карте камеры (%s) — вернул %s",
                                                   config.archive, AppConfig.archive)
-        macos.notify("improv-video", "Папка архива была на карте камеры — вернул её в «Фильмы»")
+        macos.notify("improv-video", "Папка архива была на карте камеры — она перенесена в «Фильмы»")
         config.archive = AppConfig.archive
         config.save()
     logging.getLogger("improv-video").info(

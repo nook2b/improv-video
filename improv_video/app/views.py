@@ -431,7 +431,7 @@ class AccountView(NSView):
             draw_line("Вход сохранён", tx + 11, y + 15 + 3, 14, font(12), color("text-secondary", dark))
         else:
             draw_line("Не вошли", tx, y, 15, font(13, 600), color("text-primary", dark))
-            draw_line("Нужно для автозагрузки и проверки", tx, y + 15 + 3, 14, font(12),
+            draw_line("Нужно для автоматической загрузки", tx, y + 15 + 3, 14, font(12),
                       color("text-secondary", dark))
 
 
@@ -531,7 +531,7 @@ def render_demo(outdir: Path) -> list[Path]:
             path = outdir / f"account-{'in' if signed else 'out'}-{theme}.png"
             render_png(account_view(signed, "Иван improv"), path, dark)
             written.append(path)
-        note = note_view(None, "Последние 10 роликов · не собранный день повторится при следующей вставке флешки",
+        note = note_view(None, "Последние 10 роликов. Несобранный день соберётся при следующей вставке флешки",
                          VIDEOS_WIDTH, (28, 3, 4))
         path = outdir / f"row-footer-{theme}.png"
         render_png(note, path, dark)

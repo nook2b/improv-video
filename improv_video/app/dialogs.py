@@ -372,9 +372,8 @@ def kind_painter(info: KindInfo):
             if draw:
                 _playlist_row(c, info, x0, y, w, dark)
             y += 30 + 6
-            hint = ("Для каждого типа запоминается свой плейлист" if "playlist" not in c.state
-                    else "Этот плейлист — для любой карточки ниже")
-            y += draw_wrapped(hint, x0, y, w, font(11), color("text-tertiary", dark), draw)
+            y += draw_wrapped("Выберите плейлист, затем — что снимали", x0, y, w, font(11),
+                              color("text-tertiary", dark), draw)
             y += 12
         card_w = (w - 10) / 2
         for i, kind in enumerate(KINDS):  # по два в ряд
@@ -494,8 +493,8 @@ def thumb_painter(info: ThumbInfo):
                 _centered("или нажмите, чтобы выбрать файл", y + 82, 15, font(12), secondary, x0 + w / 2)
             c.hit("pick", x0, y, w, zone_h)
         y += zone_h + 10
-        y += draw_wrapped("JPEG, PNG, HEIC… — приложение само ужмёт до 1280 px и 2 МБ. Свои обложки YouTube "
-                          "разрешает каналам с подтверждённым телефоном.", x0, y, w, font(11), tertiary, draw)
+        y += draw_wrapped("Подойдёт JPEG, PNG или HEIC. Свою обложку YouTube разрешает, когда у канала "
+                          "подтверждён номер телефона.", x0, y, w, font(11), tertiary, draw)
         y += 16
         buttons = [Btn("cancel", "Отмена", "ghost")]
         if c.state.get("image"):

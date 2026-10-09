@@ -326,7 +326,7 @@ def test_test_upload_reports_what_youtube_set(tmp_path, monkeypatch):
         c.submit("test_upload", tmp_path / "t.mp4")
         c.wait_idle()
     c.stop()
-    assert "ограничения нет" in asked[0] and "пока ограничены" in asked[1]
+    assert "будет работать" in asked[0] and "Ограниченный доступ" in asked[1]
 
 
 

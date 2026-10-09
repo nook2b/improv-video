@@ -190,7 +190,7 @@ class Controller:
             self._say("Нет места на диске", str(e))
         elif isinstance(e, youtube.NeedsLogin):
             self.signed_in = False
-            self._say("YouTube", f"{e}: меню improv-video → «Войти в YouTube»")
+            self._say("YouTube", f"{e}: меню YouTube → «Войти…»")
         elif isinstance(e, youtube.QuotaExceeded):
             self._say("YouTube", str(e))
         else:  # показываем человеку любую ошибку
@@ -214,7 +214,7 @@ class Controller:
     def _progress(self, text: str) -> None:
         log.info(text)
         self.status = text
-        if text.startswith(("Найдено", "Можно извлечь", "Повреждён")):
+        if text.startswith(("Найдено", "Можно извлечь", "Повреждённый")):
             self.ui.notify("improv-video", text)
 
     def _save_config(self) -> None:
@@ -547,19 +547,18 @@ class Controller:
 
     def _do_test_upload(self, file: Path) -> None:
         creds = youtube.credentials(self.tokens)
-        self.status = "Тестовая загрузка…"
+        self.status = "Пробная загрузка…"
         # Просим «по ссылке», как при настоящей загрузке: ответ YouTube покажет, ограничивает ли он
         # загрузки из этого API-проекта приватным режимом
-        result = youtube.upload(file, "Тест improv-video", "Проверка загрузки из improv-video",
+        result = youtube.upload(file, "Пробная загрузка improv-video", "Пробное видео — можно удалить",
                                 datetime.now(), creds=creds, privacy="unlisted",
-                                progress=lambda p: setattr(self, "status", f"Тестовая загрузка: {p:.0%}"))
+                                progress=lambda p: setattr(self, "status", f"Пробная загрузка: {p:.0%}"))
         log.info("Тестовая загрузка: просили unlisted, YouTube поставил %s — %s", result.privacy, result.url)
         if result.privacy == "unlisted":
-            verdict = ("YouTube поставил «Доступ по ссылке», как и просили — ограничения нет, "
-                       "автоматическую загрузку можно включать (YouTube → Автоматически «по ссылке»).")
+            verdict = ("YouTube поставил «Доступ по ссылке». Автоматическая загрузка будет работать: "
+                       "меню YouTube → «Автоматически «по ссылке»».")
         else:
-            verdict = (f"YouTube поставил «{result.privacy}» вместо «по ссылке» — загрузки из этого проекта "
-                       "пока ограничены. Пока остаёмся на ручной загрузке.")
+            verdict = (f"YouTube поставил «{youtube.PRIVACY_RU.get(result.privacy, result.privacy)}» вместо "
+                       "«Доступ по ссылке». С автоматической загрузкой будет так же — лучше загружать вручную.")
         self.ui.open_path(result.url)
-        self.ui.dialog(f"Тестовое видео загружено.\n\n{verdict}\n\nТестовое видео можно удалить в YouTube Studio.",
-                       ["OK"])
+        self.ui.dialog(f"Пробное видео загружено.\n\n{verdict}\n\nЕго можно удалить в YouTube Studio.", ["OK"])

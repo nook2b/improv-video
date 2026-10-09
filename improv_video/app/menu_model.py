@@ -53,7 +53,7 @@ class VideoRow:
     title: str
     detail: str
     detail_danger: bool = False
-    accessory: str = ""  # «Выбрать…», «В Studio», «при вставке»
+    accessory: str = ""  # «Выбрать…», «В Studio», «Журнал»
     accessory_icon: str | None = None  # arrow-right, external-link
     accessory_strong: bool = False
     fraction: float | None = None  # полоса загрузки
@@ -195,7 +195,7 @@ def video_row(v: VideoItem) -> VideoRow:
     if s in ("uploading", "building"):
         return VideoRow(v.key, ACTIVE, v.title, v.detail, fraction=v.fraction or 0.0, item=v)
     if s == "failed":
-        return VideoRow(v.key, DANGER, v.title, v.detail, detail_danger=True, accessory="при вставке",
+        return VideoRow(v.key, DANGER, v.title, v.detail, detail_danger=True, accessory="Журнал",
                         action="open_log", item=v)
     return VideoRow(v.key, IDLE, v.title, v.detail, item=v)  # queued
 

@@ -10,6 +10,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Callable, Protocol
 
+PRIVACY_RU = {"unlisted": "Доступ по ссылке", "private": "Ограниченный доступ", "public": "Открытый доступ"}
 UPLOAD_SCOPE = "https://www.googleapis.com/auth/youtube.upload"
 MANAGE_SCOPE = "https://www.googleapis.com/auth/youtube"  # плейлисты и обложки
 SCOPES = [UPLOAD_SCOPE, MANAGE_SCOPE]
@@ -178,7 +179,7 @@ def _call(request):
     except HttpError as e:
         code, text = _http_error(e)
         if code == 401 or "insufficientPermissions" in text or "ACCESS_TOKEN_SCOPE_INSUFFICIENT" in text:
-            raise NeedsLogin("Войдите в YouTube заново — нужен доступ к плейлистам и обложкам") from e
+            raise NeedsLogin("Войдите в YouTube заново") from e
         if code == 403 and "quotaExceeded" in text:
             raise QuotaExceeded("Дневная квота YouTube API исчерпана — повторю завтра") from e
         raise
@@ -241,8 +242,8 @@ def set_thumbnail(video_id: str, image: Path, creds=None, service=None) -> None:
     except HttpError as e:
         code, text = _http_error(e)
         if code == 403:
-            raise ThumbnailNotAllowed("YouTube не принял обложку: свои обложки доступны каналам с подтверждённым "
-                                      "телефоном (youtube.com/verify)") from e
+            raise ThumbnailNotAllowed("YouTube не принял обложку: свои обложки можно ставить, когда у канала "
+                                      "подтверждён номер телефона (youtube.com/verify)") from e
         raise
 
 

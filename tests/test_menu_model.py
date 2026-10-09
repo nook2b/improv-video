@@ -77,7 +77,7 @@ def test_video_rows():
     assert rows["uploading"].fraction == 0.4 and rows["uploading"].action is None
     assert rows["manual"].accessory == "В Studio" and rows["manual"].accessory_icon == "arrow-right"
     assert rows["uploaded"].accessory_icon == "external-link" and rows["uploaded"].action == "open_url"
-    assert rows["failed"].detail_danger and rows["failed"].accessory == "при вставке"
+    assert rows["failed"].detail_danger and rows["failed"].accessory == "Журнал"
 
 
 def test_values_and_paths():
