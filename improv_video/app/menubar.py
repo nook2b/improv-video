@@ -174,7 +174,7 @@ class MenuBarApp(rumps.App):
         self.mode_api = rumps.MenuItem("Автоматически «по ссылке»", callback=self._set_mode("api"))
         m.add(self.mode_manual)
         m.add(self.mode_api)
-        _raw(m, _note("До аудита API YouTube делает такие видео приватными"))
+        _raw(m, _note("«Проверить загрузку…» покажет, ставит ли YouTube «по ссылке»"))
         m.add(rumps.separator)
         self.test_item = rumps.MenuItem("Проверить загрузку…", callback=self.test_upload)
         m.add(self.test_item)
@@ -502,7 +502,7 @@ class MenuBarApp(rumps.App):
 
     @_in_thread
     def test_upload(self, _):
-        file = macos.choose_file("Короткое видео для проверки загрузки (станет приватным)", ["mp4", "mov"])
+        file = macos.choose_file("Короткое видео для проверки загрузки (загрузится «по ссылке»)", ["mp4", "mov"])
         if file:
             self.controller.submit("test_upload", file)
 

@@ -453,8 +453,18 @@ class Controller:
     def _do_test_upload(self, file: Path) -> None:
         creds = youtube.credentials(self.tokens)
         self.status = "Тестовая загрузка…"
+        # Просим «по ссылке», как при настоящей загрузке: ответ YouTube покажет, ограничивает ли он
+        # загрузки из этого API-проекта приватным режимом
         result = youtube.upload(file, "Тест improv-video", "Проверка загрузки из improv-video",
-                                datetime.now(), creds=creds, privacy="private",
+                                datetime.now(), creds=creds, privacy="unlisted",
                                 progress=lambda p: setattr(self, "status", f"Тестовая загрузка: {p:.0%}"))
-        self._say("YouTube", f"Загружено ({result.privacy}): {result.url}")
+        log.info("Тестовая загрузка: просили unlisted, YouTube поставил %s — %s", result.privacy, result.url)
+        if result.privacy == "unlisted":
+            verdict = ("YouTube поставил «Доступ по ссылке», как и просили — ограничения нет, "
+                       "автоматическую загрузку можно включать (YouTube → Автоматически «по ссылке»).")
+        else:
+            verdict = (f"YouTube поставил «{result.privacy}» вместо «по ссылке» — загрузки из этого проекта "
+                       "пока ограничены. Пока остаёмся на ручной загрузке.")
         self.ui.open_path(result.url)
+        self.ui.dialog(f"Тестовое видео загружено.\n\n{verdict}\n\nТестовое видео можно удалить в YouTube Studio.",
+                       ["OK"])

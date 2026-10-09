@@ -306,3 +306,20 @@ def test_handed_video_goes_to_trash_after_days(card, tmp_path, monkeypatch):
     assert any("В Корзину: Шоу" in t for _, t in ui.notes)
     detail = {it.video_id: it.detail for it in c.videos()}
     assert detail[rows[0]["id"]] == "Передан в YouTube Studio · файл в Корзине"
+
+
+def test_test_upload_reports_what_youtube_set(tmp_path, monkeypatch):
+    from improv_video import youtube
+
+    ui = FakeUI({})
+    asked = []
+    ui.dialog = lambda text, buttons, **kw: asked.append(text)
+    c = make_controller(tmp_path, ui)
+    monkeypatch.setattr(youtube, "credentials", lambda store: object())
+    for privacy in ("unlisted", "private"):
+        monkeypatch.setattr(youtube, "upload", lambda *a, privacy, **kw: youtube.UploadResult("abc", privacy_set))
+        privacy_set = privacy
+        c.submit("test_upload", tmp_path / "t.mp4")
+        c.wait_idle()
+    c.stop()
+    assert "ограничения нет" in asked[0] and "пока ограничены" in asked[1]
