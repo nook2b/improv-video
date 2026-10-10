@@ -318,6 +318,9 @@ class StatusView(NSView):
 
 # ---------- строки «Ролики» ----------
 
+REMOVE_HIT = 28  # ширина области «×» у правого края строки
+
+
 class VideoRowView(NSView):
     """Строка подменю «Ролики» (макет 04): точка, название, статус, действие справа."""
 
@@ -328,25 +331,31 @@ class VideoRowView(NSView):
         return True
 
     def mouseUp_(self, event):
+        x = self.convertPoint_fromView_(event.locationInWindow(), None).x
+        remove = self.row.removable and x >= VIDEOS_WIDTH - MENU_PAD - 8 - REMOVE_HIT
         item = self.enclosingMenuItem()
         if item is not None and item.menu() is not None:
             item.menu().cancelTracking()
-        if self.handler and self.row.action:
-            self.handler(self.row)
+        if self.handler and (remove or self.row.action):
+            self.handler(self.row, remove)
 
     def drawRect_(self, rect):
         dark = is_dark(self)
         r = self.row
         x, w = MENU_PAD, VIDEOS_WIDTH - 2 * MENU_PAD
         item = self.enclosingMenuItem()
-        if item is not None and item.isHighlighted() and r.action:
+        if item is not None and item.isHighlighted() and (r.action or r.removable):
             fill_round(x, 0, w, self.frame().size.height, 6, color("bg-row-hover", dark))
         cx = x + 8
         status_dot(cx + 6, 6 + 8, r.tone, dark)
         tx = cx + 12 + 8
         right = x + w - 8
         acc_w = 0.0
-        if r.accessory or r.accessory_icon:
+        hovered = item is not None and item.isHighlighted()
+        if hovered and r.removable:  # вместо действия справа — «×»: убрать строку
+            draw_icon("x", right - 12, 6 + 2, 12, color("text-secondary", dark))
+            acc_w = 12.0
+        elif r.accessory or r.accessory_icon:
             acc_col = color("text-primary" if r.accessory_strong else
                             ("text-tertiary" if r.action == "open_log" else "text-secondary"), dark)
             ax = right

@@ -59,6 +59,7 @@ class VideoRow:
     fraction: float | None = None  # полоса загрузки
     action: str | None = None  # kind | hand_off | open_url | open_log
     item: VideoItem | None = None
+    removable: bool = False  # при наведении справа «×»: не загружать / забыть день / убрать из списка
 
 
 def _plural(n: int, one: str, few: str, many: str) -> str:
@@ -181,6 +182,12 @@ def status_block(*, progress: DayProgress | None, status: str, busy: bool, note:
 
 
 def video_row(v: VideoItem) -> VideoRow:
+    row = _video_row(v)
+    row.removable = removal(v) is not None
+    return row
+
+
+def _video_row(v: VideoItem) -> VideoRow:
     s = v.status
     if s == "kind_needed":
         return VideoRow(v.key, WARNING, v.title, v.detail, accessory="Выбрать…", accessory_strong=True,
@@ -198,6 +205,19 @@ def video_row(v: VideoItem) -> VideoRow:
         return VideoRow(v.key, DANGER, v.title, v.detail, detail_danger=True, accessory="Журнал",
                         action="open_log", item=v)
     return VideoRow(v.key, IDLE, v.title, v.detail, item=v)  # queued
+
+
+def removal(v: VideoItem) -> tuple[str, str] | None:
+    """Что сделает «×» у строки: (кнопка, вопрос). None — убрать нельзя (собирается, загружается)."""
+    if v.status == "failed":
+        return ("Забыть день", f"Забыть день {v.title}? Он больше не будет собираться при вставке флешки. "
+                               "Копии клипов на Mac, если они есть, уйдут в Корзину.")
+    if v.status in ("kind_needed", "manual", "queued"):
+        return ("Не загружать", f"Не загружать «{v.title}»? Готовый файл ролика уйдёт в Корзину, "
+                                "и день больше не появится в списке. Клипы на флешке останутся.")
+    if v.status in ("handed", "uploaded"):
+        return ("Убрать", f"Убрать «{v.title}» из списка? На YouTube ничего не изменится.")
+    return None
 
 
 def waiting_count(videos: list[VideoItem]) -> int:

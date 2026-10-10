@@ -119,3 +119,12 @@ def test_update_line_and_notice():
     assert mm.status_block(progress=None, status="", busy=False, note=None, videos=[],
                            update=notice).title == "Обновлено до 0.1.18"
     assert mm.update_notice("0.1.18", after, now + timedelta(hours=13)) is None
+
+
+def test_remove_actions_by_status():
+    assert mm.removal(item("kind_needed", "18.08.2026"))[0] == "Не загружать"
+    assert mm.removal(item("manual"))[0] == "Не загружать"
+    assert mm.removal(item("failed", "23.01.2026"))[0] == "Забыть день"
+    assert mm.removal(item("uploaded"))[0] == "Убрать"
+    assert mm.removal(item("building")) is None and mm.removal(item("uploading")) is None
+    assert mm.video_row(item("handed")).removable and not mm.video_row(item("building")).removable

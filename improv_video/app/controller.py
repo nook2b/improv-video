@@ -20,7 +20,8 @@ from typing import Callable
 
 from .. import tools, youtube
 from ..naming import KINDS, title
-from ..pipeline import (NotEnoughSpace, VideoItem, build_pending, finish_uploaded, trash_done_videos, import_card, mark_existing_as_done,
+from ..pipeline import (NotEnoughSpace, VideoItem, build_pending, discard_video, finish_uploaded, forget_day,
+                        trash_done_videos, import_card, mark_existing_as_done,
                         new_clips_on_card, recent_videos, source_folders, upload_ready, video_metadata)
 from ..progress import DayProgress, minutes
 
@@ -448,6 +449,19 @@ class Controller:
         creds = youtube.credentials(self.tokens)
         finish_uploaded(state, partial(youtube.add_to_playlist, creds=creds),
                         partial(youtube.set_thumbnail, creds=creds), self._progress_upload)
+
+    def remove_item(self, it: VideoItem) -> None:
+        """«×» в списке «Ролики»: забыть несобранный день, не загружать ролик или убрать из списка."""
+        archive = Path(self.config.archive).expanduser()
+        with self._own_state() as state:
+            if it.status == "failed":
+                forget_day(state, it.day, archive, self.ui.trash)
+                log.info("День %s забыт — больше не собирается", f"{it.day:%d.%m.%Y}")
+            elif it.video_id and it.status in ("kind_needed", "manual", "queued"):
+                discard_video(state, it.video_id, archive, self.ui.trash)
+                log.info("«%s» — не загружать: файл в Корзине", it.title)
+            elif it.video_id:
+                state.update_video(it.video_id, hidden=1)
 
     def uploaded_videos(self) -> list[tuple[int, str]]:
         """Ролики на YouTube (новые сверху) — для окна «Обложка»."""

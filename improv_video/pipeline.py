@@ -563,6 +563,34 @@ def finish_uploaded(state: State, add_to_playlist: Callable[[str, str], None] | 
             notify(f"«{name}»: не удалось — {str(e)[:150]}. Повторю позже")
 
 
+def discard_video(state: State, video_id: int, archive: Path, trash: Callable[[Path], None]) -> None:
+    """«Не загружать»: файл ролика и копии его клипов на Mac — в Корзину, день больше не появится.
+    Клипы на флешке не трогаем."""
+    row = state.video(video_id)
+    day = date.fromisoformat(row["day"])
+    names = state.discard_clips(day, video_id)
+    for path in [Path(row["file"])] if row["file"] else []:
+        if path.exists():
+            trash(path)
+    _trash_copies(archive / row["day"], names, trash)
+    state.update_video(video_id, status="discarded", file=None)
+    state.clear_failure(day)
+
+
+def forget_day(state: State, day: date, archive: Path, trash: Callable[[Path], None]) -> None:
+    """«Забыть день»: несобранный день больше не собирается; копии клипов на Mac — в Корзину."""
+    names = state.discard_clips(day)
+    _trash_copies(archive / day.isoformat(), names, trash)
+    state.clear_failure(day)
+
+
+def _trash_copies(folder: Path, names: list[str], trash: Callable[[Path], None]) -> None:
+    for name in names:
+        copy = folder / name
+        if copy.exists():
+            trash(copy)
+
+
 def trash_done_videos(state: State, days: int, trash: Callable[[Path], None],
                       now: datetime | None = None) -> list[str]:
     """Файлы роликов, переданных в Studio или загруженных days дней назад и раньше, — в Корзину.
@@ -611,8 +639,8 @@ def recent_videos(state: State, *, upload_mode: str = "manual", uploading: dict[
     for row in state.videos():
         day = date.fromisoformat(row["day"])
         vid, status = row["id"], row["status"]
-        if status == "pending":
-            continue  # собирается — строку даёт building ниже
+        if status in ("pending", "discarded") or row["hidden"]:
+            continue  # pending собирается — строку даёт building ниже; отменённые и убранные не показываем
         if row["kind"]:
             name = title(row["kind"], day, row["part"])
         else:

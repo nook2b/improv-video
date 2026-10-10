@@ -347,10 +347,12 @@ class MenuBarApp(rumps.App):
             views.VIDEOS_WIDTH, (28, 3, 4)))
         _raw(m, note)
 
-    def _video_action(self, row) -> None:
-        """Клик по строке «Ролики» — действие по статусу."""
+    def _video_action(self, row, remove: bool = False) -> None:
+        """Клик по строке «Ролики» — действие по статусу; по «×» — убрать строку (с вопросом)."""
         c, it = self.controller, row.item
-        if row.action == "kind":
+        if remove:
+            self._remove_row(it)
+        elif row.action == "kind":
             span = it.detail.partition(" · ")[2]  # «Ждёт выбора типа · 18:05–20:40»
             c.ask_kind(it.day, span)
         elif row.action == "hand_off" and it.video_id:
@@ -359,6 +361,16 @@ class MenuBarApp(rumps.App):
             macos.open_path(it.url)
         elif row.action == "open_log":
             macos.open_path(LOG_FILE)
+
+    @_in_thread
+    def _remove_row(self, it) -> None:
+        what = mm.removal(it)
+        if what is None:
+            return
+        button, question = what
+        if macos.dialog(question, ["Отмена", button], default=button) == button:
+            self.controller.remove_item(it)
+            self._video_keys = None  # перерисовать список
 
     # ---------- действия ----------
 

@@ -88,3 +88,47 @@ def test_finish_uploaded_playlist_and_thumbnail(tmp_path):
     finish_uploaded(state, lambda pl, v: added.append((pl, v)), forbidden, notes.append)
     assert added[-1] == ("PLb", "yt1") and "подтвердите телефон" in notes
     assert state.video(vid)["thumbnail"] is None
+
+
+def test_discard_forget_and_hide(tmp_path):
+    from datetime import date
+
+    from improv_video.pipeline import discard_video, forget_day, recent_videos
+    from improv_video.state import State
+
+    archive = tmp_path / "Footage"
+    state = State(archive / "state.sqlite")
+    trashed = []
+
+    def trash(p):
+        trashed.append(p.name)
+        p.unlink()
+
+    # 18.08: собран, ждёт выбора типа — «Не загружать»
+    d1 = date(2026, 8, 18)
+    (archive / "2026-08-18").mkdir(parents=True)
+    for n in ("VID_a.mp4", "video.mp4"):
+        (archive / "2026-08-18" / n).write_bytes(b"x")
+    state.add_clip("VID_a.mp4", 1, d1)
+    vid, _ = state.create_video(d1, ["VID_a.mp4"])
+    state.update_video(vid, status="built", file=str(archive / "2026-08-18" / "video.mp4"))
+    # 23.01: не собрался — «Забыть день»
+    d2 = date(2026, 1, 23)
+    state.add_clip("VID_b.mp4", 1, d2)
+    state.set_failure(d2, "нет места на диске")
+    # 25.08: на YouTube — «Убрать из списка»
+    d3 = date(2026, 8, 25)
+    up, _ = state.create_video(d3, [], "lesson")
+    state.update_video(up, status="uploaded", youtube_id="yt", rec_start="2026-08-25T18:00:00",
+                       rec_end="2026-08-25T20:00:00")
+    assert {it.status for it in recent_videos(state)} == {"kind_needed", "failed", "uploaded"}
+
+    discard_video(state, vid, archive, trash)
+    forget_day(state, d2, archive, trash)
+    state.update_video(up, hidden=1)
+
+    assert recent_videos(state) == []
+    assert sorted(trashed) == ["VID_a.mp4", "video.mp4"]  # готовый ролик и копия клипа
+    assert state.days_with_unassigned() == [] and state.failures() == {}
+    assert state.is_known("VID_b.mp4", 1)  # при вставке флешки день не появится снова
+    assert state.video(up)["status"] == "uploaded"  # на YouTube ничего не меняется

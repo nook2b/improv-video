@@ -12,6 +12,7 @@ CREATE TABLE IF NOT EXISTS clips (
     size   INTEGER NOT NULL,
     day    TEXT NOT NULL,
     status TEXT NOT NULL,          -- copied | skipped (помечен как уже обработанный) | broken (не открывается)
+                                   -- | discarded (день отменён: «Не загружать» / «Забыть день»)
     video  INTEGER REFERENCES videos(id),
     PRIMARY KEY (name, size)
 );
@@ -24,7 +25,7 @@ CREATE TABLE IF NOT EXISTS videos (
     day        TEXT NOT NULL,
     part       INTEGER NOT NULL,
     kind       TEXT,               -- training | lesson | show | masterclass; NULL, пока не выбран
-    status     TEXT NOT NULL,      -- pending | built | manual | handed | uploaded
+    status     TEXT NOT NULL,      -- pending | built | manual | handed | uploaded | discarded («Не загружать»)
     file       TEXT,
     rec_start  TEXT,               -- начало и конец съёмки (местное время камеры, ISO)
     rec_end    TEXT,
@@ -61,6 +62,8 @@ class State:
                 self.db.execute("ALTER TABLE videos ADD COLUMN in_playlist TEXT")
             if "thumbnail" not in cols:  # подготовленная обложка, ждёт отправки на YouTube
                 self.db.execute("ALTER TABLE videos ADD COLUMN thumbnail TEXT")
+            if "hidden" not in cols:  # убран из списка «Ролики»
+                self.db.execute("ALTER TABLE videos ADD COLUMN hidden INTEGER NOT NULL DEFAULT 0")
         if "done_at" not in cols:
             # Ролики, переданные до появления автоудаления, считаются переданными сейчас
             with self.db:
@@ -153,7 +156,7 @@ class State:
 
     def update_video(self, video_id: int, **fields) -> None:
         allowed = {"kind", "status", "file", "rec_start", "rec_end", "youtube_id", "privacy", "done_at",
-                   "in_playlist", "thumbnail"}
+                   "in_playlist", "thumbnail", "hidden"}
         if not fields or set(fields) - allowed:
             raise ValueError(f"Недопустимые поля: {set(fields) - allowed}")
         cols = ", ".join(f"{k} = ?" for k in fields)
@@ -174,6 +177,15 @@ class State:
             "SELECT * FROM videos WHERE status IN ('handed', 'uploaded') AND file IS NOT NULL AND file != '' "
             "AND done_at IS NOT NULL AND done_at <= ? ORDER BY day, part",
             (moment.isoformat(timespec="seconds"),)).fetchall()
+
+    def discard_clips(self, day: date, video_id: int | None = None) -> list[str]:
+        """Клипы ролика (или ещё не собранные клипы дня) больше не обрабатывать. Возвращает их имена."""
+        where, args = ("video = ?", (video_id,)) if video_id is not None else (
+            "day = ? AND status = 'copied' AND video IS NULL", (day.isoformat(),))
+        names = [r["name"] for r in self.db.execute(f"SELECT name FROM clips WHERE {where}", args)]
+        with self.db:
+            self.db.execute(f"UPDATE clips SET status = 'discarded' WHERE {where}", args)
+        return names
 
     def set_failure(self, day: date, reason: str) -> None:
         with self.db:
