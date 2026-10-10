@@ -498,7 +498,7 @@ def video_metadata(row) -> tuple[str, str, datetime]:
     Описание пустое: время съёмки «18:05–20:40» в описании YouTube превращал в таймкоды-ссылки.
     Дата и время съёмки уходят на YouTube отдельным полем (recordingDetails).
     """
-    start, end = datetime.fromisoformat(row["rec_start"]), datetime.fromisoformat(row["rec_end"])
+    start = datetime.fromisoformat(row["rec_start"])
     return title(row["kind"], date.fromisoformat(row["day"]), row["part"]), "", start
 
 
