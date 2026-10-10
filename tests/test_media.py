@@ -65,7 +65,7 @@ def test_full_day(card, settings, identity_lut):
     state.update_video(vid, kind="lesson")
     name, desc, start = video_metadata(state.video(vid))
     assert name == "Занятие 01.10.2026"
-    assert desc == "Снято 01.10.2026 18:05 – 02.10.2026 01:30"
+    assert desc == ""  # без описания: время съёмки YouTube превращал в таймкоды
     assert start.hour == 18
 
     v, a = sorted(streams(row["file"]), key=lambda s: s["codec_type"], reverse=True)
@@ -83,6 +83,7 @@ def test_full_day(card, settings, identity_lut):
     uploaded = []
 
     def fake_upload(file, title, description, recorded_at):
+        assert description == ""  # без описания: время съёмки YouTube превращал в таймкоды
         uploaded.append(title)
         return UploadResult("abc123", "private" if title.startswith("Тренировка") else "unlisted")
 

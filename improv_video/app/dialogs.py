@@ -614,7 +614,7 @@ class ReadyInfo:
 
 
 STEPS = ["В YouTube Studio нажмите «Создать → Добавить видео»", "Перетащите выделенный файл из Finder",
-         "Вставьте название (⌘V) и описание", "Видимость — «Доступ по ссылке»"]
+         "Вставьте название (⌘V)", "Видимость — «Доступ по ссылке»"]
 
 
 def ready_painter(info: ReadyInfo):
@@ -631,8 +631,10 @@ def ready_painter(info: ReadyInfo):
         draw_line("Finder с файлом и YouTube Studio уже открыты", tx, y, 16, font(12), secondary, draw=draw)
         y += 16 + 14
         copied = c.state.get("copied", "name")
-        for i, (label, key, value) in enumerate((("Название · уже в буфере", "name", info.name),
-                                                 ("Описание", "description", info.description))):
+        fields = [("Название · уже в буфере", "name", info.name)]
+        if info.description:
+            fields.append(("Описание", "description", info.description))
+        for i, (label, key, value) in enumerate(fields):
             if i:
                 y += 10
             draw_line(label, x0, y, 11, font(11, 500), tertiary, draw=draw)
@@ -831,7 +833,7 @@ def render_demo(outdir: Path) -> list[Path]:
     painters = {
         "dialog-kind": (420, kind_painter(KindInfo("06.10.2026", "18:05–20:40 · 1.5 ч · 12 клипов", "день 1 из 2")),
                         WINDOW),
-        "dialog-ready": (420, ready_painter(ReadyInfo("Тренировка 06.10.2026", "Снято 06.10.2026, 18:05–20:40",
+        "dialog-ready": (420, ready_painter(ReadyInfo("Тренировка 06.10.2026", "",
                                                       Path("Тренировка 06.10.2026.mp4"), "4.2 ГБ")), WINDOW),
         "dialog-kind-playlist": (420, kind_painter(KindInfo(
             "06.10.2026", "18:05–20:40 · 1.5 ч · 12 клипов", "", "show", _DemoChoice())), WINDOW),
@@ -852,7 +854,7 @@ def render_demo(outdir: Path) -> list[Path]:
             written.append(path)
     # Окна целиком (без показа): то же, что делают ask_kind / show_ready / ask_first_run
     for build in (lambda ans: build_kind(KindInfo("06.10.2026", "18:05–20:40 · 1.5 ч · 12 клипов"), ans),
-                  lambda ans: build_ready(ReadyInfo("Тренировка 06.10.2026", "Снято 06.10.2026, 18:05–20:40",
+                  lambda ans: build_ready(ReadyInfo("Тренировка 06.10.2026", "",
                                                     Path("video.mp4"), "4.2 ГБ"), ans,
                                           {"copy": lambda t: None, "reveal": lambda p: None}),
                   lambda ans: build_first_run(20, 3, ans)):

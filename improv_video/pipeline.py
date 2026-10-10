@@ -493,9 +493,13 @@ def build_pending(day: date, state: State, settings: Settings, kind: str | None 
 
 
 def video_metadata(row) -> tuple[str, str, datetime]:
-    """Название, описание и время начала съёмки для ролика из журнала."""
+    """Название, описание и время начала съёмки для ролика из журнала.
+
+    Описание пустое: время съёмки «18:05–20:40» в описании YouTube превращал в таймкоды-ссылки.
+    Дата и время съёмки уходят на YouTube отдельным полем (recordingDetails).
+    """
     start, end = datetime.fromisoformat(row["rec_start"]), datetime.fromisoformat(row["rec_end"])
-    return title(row["kind"], date.fromisoformat(row["day"]), row["part"]), description(start, end), start
+    return title(row["kind"], date.fromisoformat(row["day"]), row["part"]), "", start
 
 
 def upload_ready(state: State, settings: Settings, uploader: Callable[..., "object"], notify: Notify = print,
