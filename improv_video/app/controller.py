@@ -145,7 +145,9 @@ class Controller:
         """Флешка или папка с клипами."""
         settings = self.config.settings()
         clips = new_clips_on_card(path, self.state)
-        if not clips and not self.state.days_with_unassigned():
+        # Собранные ролики без ответа на «Что снимали?» (окно закрылось само) — спросим ещё раз
+        unanswered = {date.fromisoformat(r["day"]) for r in self.state.videos("built") if not r["kind"]}
+        if not clips and not self.state.days_with_unassigned() and not unanswered:
             return
         if self.state.is_empty():
             days = len({c.start.date() for c in clips})
@@ -165,7 +167,7 @@ class Controller:
                 settings = self.config.settings()
         with self.ui.keep_awake():
             days = import_card(path, self.state, settings, self._progress)
-            for day in days:
+            for day in sorted(set(days) | unanswered):
                 self._spawn(self._ask_kind, day)
             # Новые дни и те, что раньше не собрались (флешку вынули, сбой)
             for day in sorted(set(days) | set(self.state.days_with_unassigned())):

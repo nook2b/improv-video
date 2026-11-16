@@ -130,3 +130,19 @@ def test_no_copy_mode_reads_from_card_and_resumes(card, tmp_path, monkeypatch):
     assert names == ["Занятие 01.10.2026", "Занятие 03.10.2026"], (first, names)
     assert not list(archive.rglob("VID_*.mp4"))
     assert len(list(archive.rglob("video*.mp4"))) == 2
+
+
+def test_unanswered_kind_is_asked_again(card, tmp_path, monkeypatch):
+    """Окно «Что снимали?» закрылось без ответа: при следующей вставке флешки спрашиваем снова."""
+    monkeypatch.setattr("improv_video.app.config.AppConfig.settings", _fast_settings(AppConfig.settings))
+    ui = FakeUI({"первый запуск": "Обработать все", "Что снимали": None})
+    c = make_controller(tmp_path, ui)
+    c.submit("source", card)
+    c.wait_idle(300)
+    assert c.manual == []  # собрано, но без типа не выдаётся
+
+    ui.answers["Что снимали"] = "Тренировка"
+    c.submit("source", card)
+    c.wait_idle(300)
+    c.stop()
+    assert sorted(n for n, _, _ in c.manual) == ["Тренировка 01.10.2026", "Тренировка 03.10.2026"]

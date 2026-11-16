@@ -112,10 +112,12 @@ def video_filter(target: Target, encoder: str, lut_name: str | None, adjust: str
     same = src_size == (w, h)
     rng = "pc" if src_range == "pc" else "tv"
     if lut_name:
-        steps = [f"scale=in_range={rng}:in_color_matrix=bt709", "format=gbrp10le",
-                 f"lut3d=file={lut_name}:interp=tetrahedral"]
         if adjust:
-            steps.insert(0, adjust)
+            # Поправка кривой считается в 10-битных кодах ограниченного диапазона — сначала приводим вход
+            steps = [normalize_filter(src_range), adjust, "scale=in_range=tv:in_color_matrix=bt709"]
+        else:
+            steps = [f"scale=in_range={rng}:in_color_matrix=bt709"]
+        steps += ["format=gbrp10le", f"lut3d=file={lut_name}:interp=tetrahedral"]
         size = "" if same else f"{w}:{h}:force_original_aspect_ratio=decrease:flags=lanczos:"
         steps.append(f"scale={size}out_color_matrix=bt709:out_range=tv")
     else:

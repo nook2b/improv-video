@@ -1,3 +1,4 @@
+import re
 import json
 import subprocess
 from datetime import date
@@ -139,3 +140,26 @@ def test_full_range_input_matches_limited(tmp_path, identity_lut):
         s = brightness.sample_frames([path], tmp_path / f"{path.stem}.mkv", 1.0, probe(path).color_range)
         values.append(brightness.measure(s, identity_lut, "ilog", 0))
     assert abs(values[0] - values[1]) < 0.01, values
+
+
+def test_curve_adjust_with_lut_matches_without(tmp_path, identity_lut):
+    """Обычный профиль + LUT: поправка яркости считается на приведённом сигнале, как и без LUT."""
+    from fractions import Fraction
+
+    from improv_video.video import Target, encode_chunk
+
+    src = make_clip(tmp_path / "src.mp4", 1, audio_seconds=0)
+    full = tmp_path / "VID_20261001_100000_00_001.mp4"
+    subprocess.run(["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-i", str(src),
+                    "-vf", "hue=s=0,scale=out_range=pc", "-color_range", "pc", "-c:v", "libx264",
+                    "-preset", "ultrafast", "-pix_fmt", "yuvj420p", str(full)], check=True)
+    target, adjust = Target(640, 360, Fraction(30)), brightness.adjust_filter("normal", 0.5)
+    means = []
+    for name, lut in (("with.mp4", identity_lut), ("without.mp4", None)):
+        out = encode_chunk([full], tmp_path / name, target, "libx265", lut, adjust, "ultrafast", "pc", (640, 360))
+        log = subprocess.run(["ffmpeg", "-hide_banner", "-i", str(out), "-vf",
+                              "signalstats,metadata=print:key=lavfi.signalstats.YAVG", "-f", "null", "-"],
+                             capture_output=True, text=True).stderr
+        vals = [float(v) for v in re.findall(r"YAVG=([\d.]+)", log)]
+        means.append(sum(vals) / len(vals))
+    assert abs(means[0] - means[1]) < 8, means  # в 10-битных кодах
