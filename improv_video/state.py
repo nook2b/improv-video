@@ -26,6 +26,7 @@ CREATE TABLE IF NOT EXISTS videos (
     part       INTEGER NOT NULL,
     kind       TEXT,               -- training | lesson | show | masterclass; NULL, пока не выбран
     status     TEXT NOT NULL,      -- pending | built | manual | handed | uploaded | discarded («Не загружать»)
+                                   -- | replaced («Собрать заново»: part = -id, чтобы новый ролик снова был частью 1)
     file       TEXT,
     rec_start  TEXT,               -- начало и конец съёмки (местное время камеры, ISO)
     rec_end    TEXT,
@@ -138,7 +139,7 @@ class State:
         """Новый ролик за день с номером части; возвращает (id, part)."""
         with self.db:
             part = self.db.execute(
-                "SELECT COALESCE(MAX(part), 0) + 1 FROM videos WHERE day = ?", (day.isoformat(),)
+                "SELECT COALESCE(MAX(part), 0) + 1 FROM videos WHERE day = ? AND part > 0", (day.isoformat(),)
             ).fetchone()[0]
             # Тип дня берётся тем же запросом: ответ на «Что снимали?» может прийти из окна
             # в другом потоке ровно в этот момент и не должен потеряться между чтением и записью.
@@ -177,6 +178,22 @@ class State:
             "SELECT * FROM videos WHERE status IN ('handed', 'uploaded') AND file IS NOT NULL AND file != '' "
             "AND done_at IS NOT NULL AND done_at <= ? ORDER BY day, part",
             (moment.isoformat(timespec="seconds"),)).fetchall()
+
+    def rebuild_day(self, day: date) -> list[str]:
+        """«Собрать заново»: клипы роликов дня снова свободны, старые ролики скрыты из списка.
+        Тип дня и плейлист остаются. Возвращает имена клипов."""
+        rows = self.db.execute("SELECT id FROM videos WHERE day = ? AND status NOT IN ('replaced', 'discarded')",
+                               (day.isoformat(),)).fetchall()
+        names = []
+        with self.db:
+            for r in rows:
+                names += [c["name"] for c in self.db.execute(
+                    "SELECT name FROM clips WHERE video = ? AND status = 'copied'", (r["id"],))]
+                self.db.execute("UPDATE clips SET video = NULL WHERE video = ? AND status = 'copied'", (r["id"],))
+                self.db.execute("UPDATE videos SET status = 'replaced', hidden = 1, part = -id WHERE id = ?",
+                                (r["id"],))
+            self.db.execute("DELETE FROM failures WHERE day = ?", (day.isoformat(),))
+        return names
 
     def discard_clips(self, day: date, video_id: int | None = None) -> list[str]:
         """Клипы ролика (или ещё не собранные клипы дня) больше не обрабатывать. Возвращает их имена."""

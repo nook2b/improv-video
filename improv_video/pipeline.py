@@ -639,7 +639,7 @@ def recent_videos(state: State, *, upload_mode: str = "manual", uploading: dict[
     for row in state.videos():
         day = date.fromisoformat(row["day"])
         vid, status = row["id"], row["status"]
-        if status in ("pending", "discarded") or row["hidden"]:
+        if status in ("pending", "discarded", "replaced") or row["hidden"]:
             continue  # pending собирается — строку даёт building ниже; отменённые и убранные не показываем
         if row["kind"]:
             name = title(row["kind"], day, row["part"])

@@ -73,6 +73,14 @@ def choose_file(prompt: str, extensions: list[str] | None = None) -> Path | None
         osascript(f"display alert {_q('Нужен файл ' + need)} message {_q(path.name + ' не подходит')}")
 
 
+def choose_from_list(prompt: str, items: list[str]) -> str | None:
+    """Выбор одного пункта из списка; None — «Отмена»."""
+    lst = "{" + ", ".join(_q(i) for i in items) + "}"
+    out = osascript(f"choose from list {lst} with prompt {_q(prompt)} OK button name {_q('Выбрать')} "
+                    f"cancel button name {_q('Отмена')}")
+    return None if not out or out == "false" else out
+
+
 def choose_folder(prompt: str) -> Path | None:
     out = osascript(f"POSIX path of (choose folder with prompt {_q(prompt)})")
     return Path(out) if out else None

@@ -404,3 +404,49 @@ def test_queued_card_shown_in_menu():
     assert block.progress.queued == "флешка «HotBaby»"
     busy = mm.status_block(progress=None, status="Импорт", busy=True, note=None, videos=[], queued=["A", "B"])
     assert busy.subtitle == "В очереди: флешки «A», «B»"
+
+
+def test_rebuild_day_from_inserted_card(card, tmp_path, monkeypatch):
+    import shutil
+    from datetime import date
+
+    from improv_video.state import State
+
+    monkeypatch.setattr("improv_video.app.config.AppConfig.settings", _fast_settings(AppConfig.settings))
+    volumes = tmp_path / "Volumes"
+    shutil.copytree(card, volumes / "HotBaby")
+    ui = FakeUI({"первый запуск": "Обработать все", "Что снимали": "Тренировка"})
+    config = AppConfig(archive=str(tmp_path / "Footage"), lut="", denoise="weak")
+    c = Controller(config, ui, config_path=tmp_path / "config.json", volumes_dir=volumes)
+    c.start(watch=False)
+    c.submit("source", volumes / "HotBaby")
+    c.wait_idle(300)
+    state = State(tmp_path / "Footage" / "state.sqlite")
+    first = [r["id"] for r in state.videos() if r["day"] == "2026-10-03"]
+    asked = len(ui.asked)
+
+    assert c.rebuild_day(date(2026, 10, 3)) is True  # флешка вставлена — сразу в очередь
+    c.wait_idle(300)
+    c.stop()
+    rows = [r for r in state.videos() if r["day"] == "2026-10-03"]
+    new = [r for r in rows if r["id"] not in first]
+    assert len(new) == 1 and new[0]["part"] == 1 and new[0]["kind"] == "training"  # снова часть 1, тип тот же
+    assert state.video(first[0])["status"] == "replaced"
+    assert not any("03.10.2026" in q for q in ui.asked[asked:])  # «Что снимали?» второй раз не спрашивает
+    titles = [it.title for it in c.videos()]
+    assert titles.count("Тренировка 03.10.2026") == 1  # старая строка скрыта
+
+
+def test_rebuild_day_without_card_waits(tmp_path):
+    from datetime import date
+
+    from improv_video.state import State
+
+    state = State(tmp_path / "Footage" / "state.sqlite")
+    state.add_clip("VID_20261115_180000_00_001.mp4", 1, date(2026, 11, 15))
+    vid, _ = state.create_video(date(2026, 11, 15), ["VID_20261115_180000_00_001.mp4"], "training")
+    state.update_video(vid, status="uploaded", youtube_id="yt")
+    config = AppConfig(archive=str(tmp_path / "Footage"), lut="", denoise="weak")
+    c = Controller(config, FakeUI({}), config_path=tmp_path / "config.json", volumes_dir=tmp_path / "Volumes")
+    assert c.rebuild_day(date(2026, 11, 15)) is False  # флешки нет — соберётся при вставке
+    assert state.days_with_unassigned() == [date(2026, 11, 15)]

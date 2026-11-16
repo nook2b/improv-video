@@ -22,7 +22,8 @@ from .. import tools, youtube
 from ..naming import KINDS, title
 from ..pipeline import (NotEnoughSpace, VideoItem, build_pending, discard_video, finish_uploaded, forget_day,
                         trash_done_videos, import_card, mark_existing_as_done,
-                        new_clips_on_card, recent_videos, source_folders, upload_ready, video_metadata)
+                        new_clips_on_card, recent_videos, source_folders, upload_ready, video_metadata,
+                        clip_locations)
 from ..progress import DayProgress, minutes
 
 
@@ -449,6 +450,25 @@ class Controller:
         creds = youtube.credentials(self.tokens)
         finish_uploaded(state, partial(youtube.add_to_playlist, creds=creds),
                         partial(youtube.set_thumbnail, creds=creds), self._progress_upload)
+
+    def rebuild_day(self, day: date) -> bool:
+        """«Собрать заново»: True — флешка с клипами дня вставлена и сборка поставлена в очередь,
+        False — соберётся при следующей вставке флешки (или «Обработать папку…» с этими клипами)."""
+        with self._own_state() as state:
+            names = set(state.rebuild_day(day))
+        log.info("День %s — собрать заново (%s клипов)", f"{day:%d.%m.%Y}", len(names))
+        try:
+            volumes = sorted(self.volumes_dir.iterdir()) if self.volumes_dir.exists() else []
+        except OSError:
+            volumes = []
+        for volume in volumes:
+            try:
+                if names & set(clip_locations(volume)):
+                    self.submit("source", volume)
+                    return True
+            except OSError:
+                continue
+        return False
 
     def remove_item(self, it: VideoItem) -> None:
         """«×» в списке «Ролики»: забыть несобранный день, не загружать ролик или убрать из списка."""

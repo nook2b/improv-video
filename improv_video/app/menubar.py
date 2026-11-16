@@ -137,6 +137,7 @@ class MenuBarApp(rumps.App):
             None,
             self.videos_menu,
             rumps.MenuItem("Обработать папку…", callback=self.process_folder),
+            rumps.MenuItem("Собрать заново…", callback=self.rebuild_day),
             rumps.MenuItem("Открыть архив", callback=lambda _: macos.open_path(self.config.archive)),
             None,
             self.youtube_menu,
@@ -513,6 +514,28 @@ class MenuBarApp(rumps.App):
                               "снова станут новыми. Продолжить?", ["Отмена", "Вернуть"], default="Вернуть")
         if answer == "Вернуть":
             self.controller.submit("forget_skipped")
+
+    @_in_thread
+    def rebuild_day(self, _):
+        c = self.controller
+        items = [it for it in c.videos() if it.video_id and it.status not in ("building", "uploading")]
+        if not items:
+            macos.dialog("Пока нет собранных роликов.", ["OK"])
+            return
+        by_title = {it.title: it for it in items}
+        title = macos.choose_from_list("Какой ролик собрать заново?", list(by_title))
+        if not title:
+            return
+        it = by_title[title]
+        uploaded = it.status in ("uploaded", "handed")
+        question = (f"Собрать «{title}» заново? Новый ролик тоже загрузится на YouTube — старый можно удалить "
+                    "в YouTube Studio." if uploaded else f"Собрать «{title}» заново?")
+        if macos.dialog(question, ["Отмена", "Собрать заново"], default="Собрать заново") != "Собрать заново":
+            return
+        self._video_keys = None
+        if not c.rebuild_day(it.day):
+            macos.dialog("Вставьте флешку с этим днём — ролик соберётся заново. Если клипы скопированы "
+                         "на Mac, можно выбрать их папку в «Обработать папку…».", ["OK"])
 
     @_in_thread
     def process_folder(self, _):
