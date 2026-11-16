@@ -76,6 +76,14 @@ def main() -> int:
         r = build_day(date(2026, 10, 1), [a, b], "training", 1, settings, work / "out.mp4", notify=print)
         m = probe(r.file)
         print(f"ролик: {r.title} · {m.width}x{m.height} · {float(m.fps):.3f} к/с · {m.duration:.2f} с · {r.encoder}")
+        # Пометки цвета в готовом ролике (по ним YouTube понимает, что это BT.709): только печать
+        import json
+        import subprocess
+
+        probe_out = subprocess.run([find_tool("ffprobe"), "-v", "error", "-select_streams", "v:0", "-show_entries",
+                                    "stream=color_primaries,color_transfer,color_space,color_range", "-of", "json",
+                                    str(r.file)], capture_output=True, text=True).stdout
+        print("пометки цвета:", json.loads(probe_out or "{}").get("streams", [{}])[0] or "НЕТ")
         ok = abs(m.duration - 5) < 0.2 and m.has_audio and float(m.fps) < 30 and tls_ok
     print("ИТОГ:", "OK" if ok else "ОШИБКА")
     return 0 if ok else 1
