@@ -29,3 +29,12 @@ def test_description():
     assert description(datetime(2026, 10, 1, 18, 5), datetime(2026, 10, 1, 20, 40)) == "Снято 01.10.2026, 18:05–20:40"
     assert (description(datetime(2026, 10, 1, 23, 10), datetime(2026, 10, 2, 1, 30))
             == "Снято 01.10.2026 23:10 – 02.10.2026 01:30")
+
+
+def test_show_and_masterclass_titles():
+    from datetime import date
+
+    from improv_video.naming import title
+
+    assert title("show", date(2026, 10, 8)) == "Шоу 08.10.2026"
+    assert title("masterclass", date(2026, 10, 8), 2) == "Мастер-класс 08.10.2026 (часть 2)"

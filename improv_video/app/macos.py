@@ -28,6 +28,16 @@ def osascript(script: str, timeout: float | None = None) -> str | None:
     return proc.stdout.strip()
 
 
+def trash(path: Path) -> None:
+    """В Корзину (можно вернуть), а не удаление насовсем."""
+    from Foundation import NSURL, NSFileManager
+
+    ok, _, error = NSFileManager.defaultManager().trashItemAtURL_resultingItemURL_error_(
+        NSURL.fileURLWithPath_(str(path)), None, None)
+    if not ok:
+        raise OSError(f"Не удалось переместить в Корзину {path}: {error}")
+
+
 def notify(title: str, text: str) -> None:
     osascript(f"display notification {_q(text)} with title {_q(title)}")
 
@@ -83,15 +93,30 @@ def open_path(target: str | Path) -> None:
 
 @contextmanager
 def keep_awake():
-    """Не даёт Mac уснуть, пока идёт работа (крышка ноутбука при этом должна быть открыта)."""
-    proc = None
+    """Пока идёт работа: Mac не засыпает (крышка должна быть открыта) и не включает App Nap.
+
+    App Nap притормаживает фоновые приложения, когда за компьютером никого нет: по журналу
+    ночью куски кодировались в 3 раза медленнее, чем днём. Активность «по просьбе
+    пользователя» отключает App Nap и для запущенных ffmpeg.
+    """
+    proc, info, token = None, None, None
     try:
         proc = subprocess.Popen(["caffeinate", "-i", "-w", str(os.getpid())])
     except FileNotFoundError:
         pass
     try:
+        from Foundation import NSActivityIdleSystemSleepDisabled, NSActivityUserInitiated, NSProcessInfo
+
+        info = NSProcessInfo.processInfo()
+        token = info.beginActivityWithOptions_reason_(NSActivityUserInitiated | NSActivityIdleSystemSleepDisabled,
+                                                      "Сборка ролика improv-video")
+    except Exception:  # noqa: BLE001 — не Mac или нет PyObjC: остаётся caffeinate
+        token = None
+    try:
         yield
     finally:
+        if token is not None:
+            info.endActivity_(token)
         if proc:
             proc.terminate()
 
@@ -123,3 +148,35 @@ def set_launch_at_login(enabled: bool) -> None:
         "RunAtLoad": True,
     }
     LAUNCH_AGENT.write_bytes(plistlib.dumps(plist))
+
+
+# ---------- окна по дизайну (improv_video.app.dialogs) ----------
+
+def ask_kind(day, meta: str = "", note: str = "", default: str = "training", timeout: float | None = None,
+             playlists=None):
+    from . import dialogs
+
+    return dialogs.ask_kind(dialogs.KindInfo(f"{day:%d.%m.%Y}", meta, note, default, playlists), timeout)
+
+
+def ask_thumbnail(videos: list):
+    from . import dialogs
+
+    return dialogs.ask_thumbnail(dialogs.ThumbInfo(videos))
+
+
+def ask_first_run(clips: int, days: int):
+    from . import dialogs
+
+    return dialogs.ask_first_run(clips, days)
+
+
+def show_ready(name: str, desc: str, file: Path) -> None:
+    from . import dialogs
+
+    try:
+        size = f"{Path(file).stat().st_size / 1024**3:.1f} ГБ"
+    except OSError:
+        size = ""
+    dialogs.show_ready(dialogs.ReadyInfo(name, desc, Path(file), size),
+                       {"copy": copy_to_clipboard, "reveal": reveal})

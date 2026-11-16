@@ -27,6 +27,19 @@ CHAINS = {
     "сейчас (2 пересчёта, LUT с поправкой)": (
         "scale=in_range=pc:in_color_matrix=bt709,format=gbrp10le,lut3d=file=lut.cube:interp=tetrahedral,"
         "scale=out_color_matrix=bt709:out_range=tv,format=p010le"),
+    "1080p: LUT на 4K, потом уменьшение (было)": (
+        "scale=in_range=pc:in_color_matrix=bt709,format=gbrp10le,lut3d=file=lut.cube:interp=tetrahedral,"
+        "scale=1920:1080:force_original_aspect_ratio=decrease:flags=lanczos:out_color_matrix=bt709:out_range=tv,"
+        "format=p010le"),
+    "1080p: уменьшение, потом LUT (стало)": (
+        "scale=1920:1080:force_original_aspect_ratio=decrease:flags=lanczos:in_range=pc:in_color_matrix=bt709,"
+        "format=gbrp10le,lut3d=file=lut.cube:interp=tetrahedral,scale=out_color_matrix=bt709:out_range=tv,"
+        "format=p010le"),
+    "1080p: уменьшение на видеочипе (scale_vt), потом LUT": (
+        ["-hwaccel", "videotoolbox", "-hwaccel_output_format", "videotoolbox_vld"],
+        "scale_vt=w=1920:h=1080,hwdownload,format=nv12,scale=in_range=pc:in_color_matrix=bt709,"
+        "format=gbrp10le,lut3d=file=lut.cube:interp=tetrahedral,scale=out_color_matrix=bt709:out_range=tv,"
+        "format=p010le"),
     "2 пересчёта, float": (
         "scale=in_range=pc:in_color_matrix=bt709,format=gbrpf32le,lut3d=file=lut.cube:interp=tetrahedral,"
         "scale=out_color_matrix=bt709:out_range=tv,format=p010le"),
@@ -36,9 +49,15 @@ CHAINS = {
 }
 
 
-def _run(clip: Path, vf: str, cwd: Path) -> float:
+def _split(chain) -> tuple[list[str], str]:
+    """Цепочка — строка фильтров или (свои параметры декода, фильтры)."""
+    return chain if isinstance(chain, tuple) else (decode_args(), chain)
+
+
+def _run(clip: Path, chain, cwd: Path) -> float:
+    dec, vf = _split(chain)
     t0 = time.monotonic()
-    ffmpeg([*decode_args(), "-i", str(clip), "-frames:v", str(FRAMES), "-vf", vf, "-an", "-f", "null", "-"], cwd=cwd)
+    ffmpeg([*dec, "-i", str(clip), "-frames:v", str(FRAMES), "-vf", vf, "-an", "-f", "null", "-"], cwd=cwd)
     return FRAMES / (time.monotonic() - t0)
 
 
@@ -70,17 +89,19 @@ def main(argv: list[str]) -> int:
                 best = (name, fps)
         # Несколько записей одновременно: суммарная скорость лучшей цепочки
         if best:
-            vf = CHAINS[best[0]]
+            dec, vf = _split(CHAINS[best[0]])
             for n in (2, 3, 4):
                 t0 = time.monotonic()
-                procs = [subprocess.Popen([find_tool("ffmpeg"), "-hide_banner", "-nostdin", "-y", *decode_args(),
+                procs = [subprocess.Popen([find_tool("ffmpeg"), "-hide_banner", "-nostdin", "-y", *dec,
                                            "-i", str(clip), "-frames:v", str(FRAMES), "-vf", vf, "-an", "-f", "null", "-"],
                                           cwd=work, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
                          for _ in range(n)]
                 for p in procs:
                     p.wait()
                 print(f"{best[0]} × {n} параллельно: {n * FRAMES / (time.monotonic() - t0):.1f} к/с суммарно", flush=True)
-        # Полная сборка: 20 с 4K I-Log полного диапазона, куски по 5 с, параллельно
+        # Полная сборка: 20 с 4K I-Log полного диапазона, куски по 5 с, параллельно.
+        # Опорный кадр раз в секунду, как у камеры: иначе прыжки к кадрам автоцвета
+        # (и к началу кусков) расшифровывают по 8 с видео и сборка выглядит медленнее, чем есть.
         from datetime import date
 
         from .pipeline import Settings, auto_workers, build_day
@@ -88,18 +109,18 @@ def main(argv: list[str]) -> int:
         day_clip = work / "VID_20261001_180000_00_001.mp4"
         ffmpeg(["-f", "lavfi", "-i", "testsrc2=s=3840x2160:r=30000/1001:d=20", "-f", "lavfi",
                 "-i", "sine=f=300:d=20:sample_rate=48000", "-vf", "scale=out_range=pc", "-pix_fmt", "yuvj420p",
-                "-c:v", "libx265", "-preset", "ultrafast", "-x265-params", "log-level=error",
+                "-c:v", "libx265", "-preset", "ultrafast", "-x265-params", "log-level=error:keyint=30",
                 "-c:a", "aac", "-ac", "2", str(day_clip)])
-        for workers in (1, auto_workers()):
+        for height, workers in ((2160, 1), (2160, auto_workers()), (1080, auto_workers())):
             settings = Settings(archive=work, lut=work / "lut.cube", profile="ilog", denoise="medium",
                                 rnnoise_model=resources_dir() / "rnnoise" / "bd.rnnn", workers=workers,
-                                chunk_seconds=5)
+                                chunk_seconds=5, max_height=height)
             t0 = time.monotonic()
-            r = build_day(date(2026, 10, 1), [day_clip], "training", 1, settings, work / f"day{workers}.mp4",
-                          notify=lambda _: None)
+            r = build_day(date(2026, 10, 1), [day_clip], "training", 1, settings,
+                          work / f"day{height}_{workers}.mp4", notify=lambda m: m.startswith("Время") and print("  " + m))
             dt = time.monotonic() - t0
             frames = 20 * 30000 / 1001
-            print(f"полная сборка ({workers} процесс.): {frames / dt:.1f} к/с, "
+            print(f"полная сборка {height}p ({workers} процесс.): {frames / dt:.1f} к/с, "
                   f"2 часа видео ≈ {2 * 3600 * 30000 / 1001 / (frames / dt) / 3600:.1f} ч ({r.encoder})", flush=True)
     return 0
 

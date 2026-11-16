@@ -69,7 +69,17 @@ jobs:
       - name: Самопроверка собранного приложения
         run: dist/improv-video.app/Contents/MacOS/improv-video --selftest
 
+      - name: Картинки меню (светлая и тёмная тема) и слепок меню
+        run: dist/improv-video.app/Contents/MacOS/improv-video --render-ui ui-snapshots
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ui-snapshots
+          path: ui-snapshots
+
       - name: Замер скорости цветовой обработки 4K
+        # ~3 мин машины Mac (минуты Mac в 10 раз дороже): только при ручном запуске
+        if: github.event_name == 'workflow_dispatch'
         run: dist/improv-video.app/Contents/MacOS/improv-video --bench calibration/AcePro2_I-Log_To_Rec.709_V1.0.cube
 
       - name: Архив
@@ -80,8 +90,28 @@ jobs:
           name: improv-video-mac
           path: improv-video-mac.zip
 
-      - name: Релиз (для тегов v*)
-        if: startsWith(github.ref, 'refs/tags/v')
+      - name: Картинки меню в лог (для проверки без доступа к артефактам)
+        run: |
+          mkdir -p small
+          for f in ui-snapshots/*-light.png; do
+            w=$(sips -g pixelWidth "$f" | awk '/pixelWidth/ {print $2}')
+            sips --resampleWidth $((w / 2)) "$f" --out "small/$(basename "$f")" >/dev/null
+            echo "PNG $(basename "$f") $(base64 -i "small/$(basename "$f")" | tr -d '\n')"
+          done
+
+      - name: Релиз новой версии (из него приложение обновляется само)
+        # Версия из pyproject.toml; релиз создаётся один раз — на первый пуш с этой версией.
+        # Тег от GITHUB_TOKEN не запускает сборку повторно.
+        if: github.event_name == 'push'
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release create "${GITHUB_REF_NAME}" improv-video-mac.zip --title "improv-video ${GITHUB_REF_NAME}" --notes "Сборка для Mac (Apple Silicon)."
+        run: |
+          V=$(python3 -c "import tomllib; print(tomllib.load(open('pyproject.toml', 'rb'))['project']['version'])")
+          if gh release view "v$V" >/dev/null 2>&1; then
+            echo "Релиз v$V уже есть — новый не нужен"
+            exit 0
+          fi
+          shasum -a 256 improv-video-mac.zip > improv-video-mac.zip.sha256
+          git log -1 --format=%B | sed '/^Co-Authored-By/,$d' > notes.txt
+          gh release create "v$V" improv-video-mac.zip improv-video-mac.zip.sha256 \
+            --target "$GITHUB_SHA" --latest --title "improv-video $V" --notes-file notes.txt

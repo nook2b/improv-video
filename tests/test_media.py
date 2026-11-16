@@ -66,7 +66,7 @@ def test_full_day(card, settings, identity_lut):
     state.update_video(vid, kind="lesson")
     name, desc, start = video_metadata(state.video(vid))
     assert name == "Занятие 01.10.2026"
-    assert desc == "Снято 01.10.2026 18:05 – 02.10.2026 01:30"
+    assert desc == ""  # без описания: время съёмки YouTube превращал в таймкоды
     assert start.hour == 18
 
     v, a = sorted(streams(row["file"]), key=lambda s: s["codec_type"], reverse=True)
@@ -84,6 +84,7 @@ def test_full_day(card, settings, identity_lut):
     uploaded = []
 
     def fake_upload(file, title, description, recorded_at):
+        assert description == ""  # без описания: время съёмки YouTube превращал в таймкоды
         uploaded.append(title)
         return UploadResult("abc123", "private" if title.startswith("Тренировка") else "unlisted")
 
@@ -140,6 +141,33 @@ def test_full_range_input_matches_limited(tmp_path, identity_lut):
         s = brightness.sample_frames([path], tmp_path / f"{path.stem}.mkv", 1.0, probe(path).color_range)
         values.append(brightness.measure(s, identity_lut, "ilog", 0))
     assert abs(values[0] - values[1]) < 0.01, values
+
+
+def test_broken_clip_is_skipped_not_whole_card(tmp_path, settings):
+    """Оборванная запись (нет moov) не должна останавливать всю карту."""
+    card = tmp_path / "card"
+    cam = card / "DCIM" / "Camera01"
+    make_clip(cam / "VID_20261001_180500_00_001.mp4", 2)
+    broken = cam / "VID_20260719_194558_00_578.mp4"
+    broken.write_bytes((cam / "VID_20261001_180500_00_001.mp4").read_bytes()[:4000])  # обрыв: только начало
+    state = State(settings.archive / "state.sqlite")
+    notes = []
+    days = import_card(card, state, settings, notify=notes.append)
+    assert [names for names in days.values()] == [["VID_20261001_180500_00_001.mp4"]]
+    assert any(n.startswith("Повреждённый клип пропущен: VID_20260719_194558_00_578.mp4") for n in notes)
+    assert import_card(card, state, settings, notify=notes.append) == {}  # второй раз не спотыкается
+
+
+def test_archive_on_camera_card_is_detected(tmp_path):
+    from improv_video.pipeline import is_camera_card
+
+    volumes = tmp_path / "Volumes"
+    (volumes / "HotBaby" / "DCIM" / "Camera01").mkdir(parents=True)
+    (volumes / "Backup" / "improv").mkdir(parents=True)
+    assert is_camera_card(volumes / "HotBaby" / "DCIM" / "Camera01", volumes)
+    assert is_camera_card(volumes / "HotBaby", volumes)
+    assert not is_camera_card(volumes / "Backup" / "improv", volumes)  # внешний диск без DCIM — можно
+    assert not is_camera_card(tmp_path / "Movies", volumes)
 
 
 def test_curve_adjust_with_lut_matches_without(tmp_path, identity_lut):

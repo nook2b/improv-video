@@ -10,6 +10,7 @@ class FakeUI:
     def __init__(self, answers):
         self.answers = answers  # подстрока вопроса → ответ
         self.asked, self.notes, self.clipboard, self.opened, self.revealed = [], [], [], [], []
+        self.ready = []
         self.lock = threading.Lock()
 
     def dialog(self, text, buttons, default=None, title="", giving_up_after=None):
@@ -18,10 +19,32 @@ class FakeUI:
         for key, answer in self.answers.items():
             if key in text:
                 return answer
-        return buttons[-1]
+        return buttons[-1] if buttons else None
+
+    def ask_first_run(self, clips, days):
+        answer = self.dialog(f"На карте {clips} клипов за {days} дн. — первый запуск", [])
+        return {"Обработать все": "all", "Считать обработанными": "skip"}.get(answer)
+
+    def ask_kind(self, day, meta="", note="", default="training", timeout=None, playlists=None):
+        answer = self.dialog(f"Что снимали {day:%d.%m.%Y}? {meta}", [])
+        from improv_video.naming import KINDS
+
+        kind = {label: key for key, label in KINDS.items()}.get(answer)
+        self.playlist_choice = playlists
+        if playlists is not None and kind and hasattr(self, "pick_playlist"):
+            return kind, self.pick_playlist(playlists, kind)
+        return kind
+
+    def show_ready(self, name, desc, file):
+        with self.lock:
+            self.ready.append((name, desc, Path(file)))
 
     def notify(self, title, text):
         self.notes.append((title, text))
+
+    def trash(self, path):
+        Path(path).unlink()
+        self.trashed = getattr(self, "trashed", []) + [Path(path)]
 
     def choose_file(self, prompt, extensions=None):
         return None
@@ -63,6 +86,75 @@ def test_card_to_manual_upload(card, tmp_path, monkeypatch):
     assert "https://studio.youtube.com" in ui.opened
     assert all(p.name.startswith("video") for p in ui.revealed)
     assert AppConfig.load(tmp_path / "config.json").last_kind in ("lesson", "training")
+    assert any("готов за" in t for _, t in ui.notes)
+    assert any("Что снимали 01.10.2026? 18:05–" in q and "клипа" in q for q in ui.asked)
+    assert sorted(n for n, _, _ in ui.ready) == ["Занятие 01.10.2026", "Тренировка 03.10.2026"]
+    statuses = {it.title: it.status for it in c.videos()}
+    # «Готово» в окне «Ролик готов» → передан в Studio
+    assert statuses == {"Занятие 01.10.2026": "handed", "Тренировка 03.10.2026": "handed"}
+
+
+def test_first_video_ready_while_next_day_builds(card, tmp_path, monkeypatch):
+    """Ролик первого дня выдаётся сразу, а не после сборки всей флешки."""
+    import time
+
+    import improv_video.pipeline as pl
+
+    monkeypatch.setattr("improv_video.app.config.AppConfig.settings", _fast_settings(AppConfig.settings))
+    ui = FakeUI({"первый запуск": "Обработать все", "Что снимали": "Занятие"})
+    c = make_controller(tmp_path, ui)
+    real, ready_before = pl.build_day, []
+
+    def build(day, *a, **kw):
+        if ready_before == [] and day.day == 3:  # второй день: первый ролик должен уже быть выдан
+            end = time.monotonic() + 30
+            while not ui.ready and time.monotonic() < end:
+                time.sleep(0.05)
+            ready_before.append([n for n, _, _ in ui.ready])
+        return real(day, *a, **kw)
+
+    monkeypatch.setattr(pl, "build_day", build)
+    c.submit("source", card)
+    c.wait_idle(300)
+    c.stop()
+    assert ready_before == [["Занятие 01.10.2026"]]
+    assert sorted(n for n, _, _ in ui.ready) == ["Занятие 01.10.2026", "Занятие 03.10.2026"]
+
+
+def test_no_new_clips_note(card, tmp_path):
+    ui = FakeUI({"первый запуск": "Считать обработанными"})
+    c = make_controller(tmp_path, ui)
+    c.submit("source", card)
+    c.wait_idle()
+    c.submit("source", card)  # всё уже обработано
+    c.wait_idle()
+    c.stop()
+    assert ("improv-video", "Новых клипов нет") in ui.notes
+    assert c.status == "Новых клипов нет" and not c.busy
+
+
+def test_stop_processing_keeps_day_for_next_insert(card, tmp_path, monkeypatch):
+    from improv_video import tools
+    import improv_video.pipeline as pl
+
+    monkeypatch.setattr("improv_video.app.config.AppConfig.settings", _fast_settings(AppConfig.settings))
+    ui = FakeUI({"первый запуск": "Обработать все", "Что снимали": "Занятие"})
+    c = make_controller(tmp_path, ui, copy_clips=False)
+    calls = []
+
+    def stopped(*a, **kw):
+        calls.append(a[0])
+        raise tools.Cancelled()
+
+    monkeypatch.setattr(pl, "build_day", stopped)
+    c.submit("source", card)
+    c.wait_idle(300)
+    c.stop()
+    assert len(calls) == 1  # остальные дни после остановки не начинаются
+    assert any("Обработка остановлена" in t for _, t in ui.notes)
+    failed = [it for it in c.videos() if it.status == "failed"]
+    assert len(failed) == 1 and "остановили" in failed[0].detail
+    assert c.manual == []
 
 
 def test_first_run_can_skip(card, tmp_path):
@@ -132,17 +224,183 @@ def test_no_copy_mode_reads_from_card_and_resumes(card, tmp_path, monkeypatch):
     assert len(list(archive.rglob("video*.mp4"))) == 2
 
 
-def test_unanswered_kind_is_asked_again(card, tmp_path, monkeypatch):
-    """Окно «Что снимали?» закрылось без ответа: при следующей вставке флешки спрашиваем снова."""
+def test_interrupted_build_is_released_on_start(card, tmp_path):
+    """Вышли из приложения посреди сборки: день не теряется, временные куски удаляются."""
+    from datetime import date
+
+    from improv_video.state import State
+
+    archive = tmp_path / "Footage"
+    state = State(archive / "state.sqlite")
+    day = date(2026, 10, 1)
+    state.add_clip("VID_20261001_180500_00_578.mp4", 1, day)
+    state.create_video(day, ["VID_20261001_180500_00_578.mp4"])  # «собирается», и приложение закрыли
+    state.close()
+    junk = archive / day.isoformat() / "improv-abc123"
+    junk.mkdir(parents=True)
+    (junk / "rec1_000.mp4").write_bytes(b"x" * 10)
+
+    c = make_controller(tmp_path, FakeUI({}))
+    c.wait_idle()
+    c.submit("forget_skipped")  # любая задача — чтобы рабочий поток точно стартовал
+    c.wait_idle()
+    c.stop()
+    check = State(archive / "state.sqlite")
+    assert check.unassigned_clips(day) == ["VID_20261001_180500_00_578.mp4"]
+    assert check.videos() == []
+    assert not junk.exists()
+
+
+def test_menu_actions_work_while_card_is_processing(card, tmp_path, monkeypatch):
+    """Ответ «Что снимали?» и ручная выдача не ждут, пока соберутся все дни с флешки."""
+    import threading
+    import time
+    from datetime import date
+
+    from improv_video.state import State
+
     monkeypatch.setattr("improv_video.app.config.AppConfig.settings", _fast_settings(AppConfig.settings))
-    ui = FakeUI({"первый запуск": "Обработать все", "Что снимали": None})
-    c = make_controller(tmp_path, ui)
+    ui = FakeUI({"первый запуск": "Обработать все"})  # на «Что снимали?» не отвечаем
+    c = make_controller(tmp_path, ui, copy_clips=False)
     c.submit("source", card)
     c.wait_idle(300)
-    assert c.manual == []  # собрано, но без типа не выдаётся
+    day = date(2026, 10, 1)
+    vid = next(it.video_id for it in c.videos() if it.day == day)
 
-    ui.answers["Что снимали"] = "Тренировка"
+    busy = threading.Event()
+    c._do_block = lambda: busy.wait(30)  # очередь занята, как во время сборки других дней
+    c.submit("block")
+    c.set_kind(day, "lesson")
+    statuses = {it.day: (it.title, it.status) for it in c.videos()}
+    assert statuses[day] == ("Занятие 01.10.2026", "manual")  # тип записан сразу
+
+    c.hand_off_video(vid)
+    deadline = time.monotonic() + 10
+    while not any(n == "Занятие 01.10.2026" for n, _, _ in ui.ready) and time.monotonic() < deadline:
+        time.sleep(0.05)
+    assert any(n == "Занятие 01.10.2026" for n, _, _ in ui.ready)  # окно «Ролик готов» без очереди
+    busy.set()
+    c.wait_idle(60)
+    c.stop()
+    assert State(tmp_path / "Footage" / "state.sqlite").video(vid)["status"] == "handed"
+
+
+def test_handed_video_goes_to_trash_after_days(card, tmp_path, monkeypatch):
+    from datetime import datetime, timedelta
+
+    from improv_video.state import State
+
+    monkeypatch.setattr("improv_video.app.config.AppConfig.settings", _fast_settings(AppConfig.settings))
+    ui = FakeUI({"первый запуск": "Обработать все", "Что снимали": "Шоу"})
+    c = make_controller(tmp_path, ui, delete_after_days=3)
+    c.submit("source", card)
+    c.wait_idle(300)
+    c.cleanup()
+    assert not getattr(ui, "trashed", [])  # «Готово» только что — рано
+
+    state = State(tmp_path / "Footage" / "state.sqlite")
+    old = (datetime.now() - timedelta(days=4)).isoformat(timespec="seconds")
+    rows = state.videos("handed")
+    assert rows and all(r["done_at"] for r in rows)
+    state.update_video(rows[0]["id"], done_at=old)
+    c.cleanup()
+    c.stop()
+    assert ui.trashed == [Path(rows[0]["file"])] and not ui.trashed[0].exists()
+    assert state.video(rows[0]["id"])["file"] is None
+    assert any("В Корзину: Шоу" in t for _, t in ui.notes)
+    detail = {it.video_id: it.detail for it in c.videos()}
+    assert detail[rows[0]["id"]] == "Передан в YouTube Studio · файл в Корзине"
+
+
+def test_test_upload_reports_what_youtube_set(tmp_path, monkeypatch):
+    from improv_video import youtube
+
+    ui = FakeUI({})
+    asked = []
+    ui.dialog = lambda text, buttons, **kw: asked.append(text)
+    c = make_controller(tmp_path, ui)
+    monkeypatch.setattr(youtube, "credentials", lambda store: object())
+    for privacy in ("unlisted", "private"):
+        monkeypatch.setattr(youtube, "upload", lambda *a, privacy, **kw: youtube.UploadResult("abc", privacy_set))
+        privacy_set = privacy
+        c.submit("test_upload", tmp_path / "t.mp4")
+        c.wait_idle()
+    c.stop()
+    assert "будет работать" in asked[0] and "Ограниченный доступ" in asked[1]
+
+
+
+def test_playlist_chosen_in_kind_dialog_and_video_added_after_upload(card, tmp_path, monkeypatch):
+    import json
+    from datetime import date
+
+    from improv_video import youtube
+    from improv_video.state import State
+
+    monkeypatch.setattr("improv_video.app.config.AppConfig.settings", _fast_settings(AppConfig.settings))
+    added, uploads = [], []
+    monkeypatch.setattr(youtube, "credentials", lambda store: object())
+    channel = [youtube.Playlist("PLa", "Команда А")]  # плейлисты канала, как их вернёт YouTube
+    monkeypatch.setattr(youtube, "list_playlists", lambda creds: list(channel))
+    monkeypatch.setattr(youtube, "create_playlist", lambda name, creds: channel.append(youtube.Playlist("PLm", name))
+                        or channel[-1])
+    monkeypatch.setattr(youtube, "add_to_playlist", lambda pl, vid, creds: added.append((pl, vid)))
+    monkeypatch.setattr(youtube, "upload", lambda *a, **kw: uploads.append(1)
+                        or youtube.UploadResult(f"yt{len(uploads)}", "unlisted"))
+
+    class Tokens:
+        def load(self):
+            return json.dumps({"scopes": youtube.SCOPES})
+
+    ui = FakeUI({"первый запуск": "Обработать все", "01.10.2026": "Шоу", "03.10.2026": "Мастер-класс"})
+    # Шоу — в «Команду А» из списка канала, мастер-класс — в новый плейлист из того же окна
+    ui.pick_playlist = lambda choice, kind: (choice.create("Мастер-классы") if kind == "masterclass"
+                                             else choice.playlists[0])
+    config = AppConfig(archive=str(tmp_path / "Footage"), lut="", denoise="weak", upload_mode="api")
+    c = Controller(config, ui, config_path=tmp_path / "config.json", volumes_dir=tmp_path / "Volumes",
+                   token_store=Tokens())
+    c.start(watch=False)
     c.submit("source", card)
     c.wait_idle(300)
     c.stop()
-    assert sorted(n for n, _, _ in c.manual) == ["Тренировка 01.10.2026", "Тренировка 03.10.2026"]
+
+    state = State(tmp_path / "Footage" / "state.sqlite")
+    assert state.day_playlist(date(2026, 10, 1)) == ("PLa", "Команда А")
+    assert state.day_playlist(date(2026, 10, 3)) == ("PLm", "Мастер-классы")
+    assert sorted(added) == [("PLa", r["youtube_id"]) for r in state.videos("uploaded") if r["day"] == "2026-10-01"] \
+        + [("PLm", r["youtube_id"]) for r in state.videos("uploaded") if r["day"] == "2026-10-03"]
+    assert all(r["in_playlist"] for r in state.videos("uploaded"))
+    saved = AppConfig.load(tmp_path / "config.json")
+    assert saved.kind_playlists == {"show": ["PLa", "Команда А"], "masterclass": ["PLm", "Мастер-классы"]}
+    assert ["PLm", "Мастер-классы"] in saved.playlists  # новый плейлист — в списке для следующего окна
+
+
+def test_card_inserted_during_processing_is_announced(card, tmp_path):
+    import shutil
+    import time
+
+    ui = FakeUI({"первый запуск": "Считать обработанными"})
+    volumes = tmp_path / "Volumes"
+    volumes.mkdir()
+    config = AppConfig(archive=str(tmp_path / "Footage"), lut="", denoise="weak")
+    c = Controller(config, ui, config_path=tmp_path / "config.json", volumes_dir=volumes)
+    c.status = "Сборка другой флешки"  # занято
+    c.start(watch=True)
+    shutil.copytree(card, volumes / "HotBaby")
+    end = time.monotonic() + 15
+    while not any("HotBaby" in t for _, t in ui.notes) and time.monotonic() < end:
+        time.sleep(0.1)
+    c.stop()
+    assert ("improv-video", "Флешка «HotBaby» найдена — обработаю после текущей") in ui.notes
+
+
+def test_queued_card_shown_in_menu():
+    from improv_video.app import menu_model as mm
+    from improv_video.progress import DayProgress
+
+    p = DayProgress("Тренировка 06.10.2026")
+    p.start("encode")
+    block = mm.status_block(progress=p, status="", busy=True, note=None, videos=[], queued=["HotBaby"])
+    assert block.progress.queued == "флешка «HotBaby»"
+    busy = mm.status_block(progress=None, status="Импорт", busy=True, note=None, videos=[], queued=["A", "B"])
+    assert busy.subtitle == "В очереди: флешки «A», «B»"

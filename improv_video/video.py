@@ -104,33 +104,36 @@ def video_filter(target: Target, encoder: str, lut_name: str | None, adjust: str
                  src_range: str = "tv", src_size: tuple[int, int] | None = None) -> str:
     """Цепочка на кадр.
 
-    С LUT — два пересчёта цвета: вход (8 бит, полный диапазон) → RGB 10 бит → LUT (поправка
-    яркости уже запечена в нём) → YUV 10 бит BT.709 с масштабом, если размер отличается.
-    Без LUT — приведение к 10 битам, поправка яркости кривой, масштаб.
+    Порядок ради скорости: сначала лишние кадры отбрасываются (60 → 30 к/с), затем кадр
+    уменьшается до итогового размера, и только потом считается цвет — LUT на 1080p вместо 4K
+    в 4 раза дешевле, а на вид для 1080p-ролика разницы нет.
+    С LUT — два пересчёта цвета: вход (8 бит, полный диапазон) → RGB 10 бит в итоговом размере →
+    LUT (поправка яркости уже запечена в нём) → YUV 10 бит BT.709.
+    Без LUT — приведение к 10 битам в итоговом размере, поправка яркости кривой.
     """
     w, h = target.width, target.height
     same = src_size == (w, h)
     rng = "pc" if src_range == "pc" else "tv"
+    size = "" if same else f"{w}:{h}:force_original_aspect_ratio=decrease:flags=lanczos:"
+    steps = [f"fps={target.fps.numerator}/{target.fps.denominator}"]
     if lut_name:
         if adjust:
             # Поправка кривой считается в 10-битных кодах ограниченного диапазона — сначала приводим вход
-            steps = [normalize_filter(src_range), adjust, "scale=in_range=tv:in_color_matrix=bt709"]
+            steps += [f"scale={size}in_range={rng}:out_range=tv:in_color_matrix=bt709:out_color_matrix=bt709",
+                      "format=yuv420p10le", adjust, "scale=in_range=tv:in_color_matrix=bt709"]
         else:
-            steps = [f"scale=in_range={rng}:in_color_matrix=bt709"]
-        steps += ["format=gbrp10le", f"lut3d=file={lut_name}:interp=tetrahedral"]
-        size = "" if same else f"{w}:{h}:force_original_aspect_ratio=decrease:flags=lanczos:"
-        steps.append(f"scale={size}out_color_matrix=bt709:out_range=tv")
+            steps.append(f"scale={size}in_range={rng}:in_color_matrix=bt709")
+        steps += ["format=gbrp10le", f"lut3d=file={lut_name}:interp=tetrahedral",
+                  "scale=out_color_matrix=bt709:out_range=tv"]
     else:
-        steps = [normalize_filter(src_range)]
+        steps += [f"scale={size}in_range={rng}:out_range=tv:in_color_matrix=bt709:out_color_matrix=bt709",
+                  "format=yuv420p10le"]
         if adjust:
             steps.append(adjust)
-        if not same:
-            steps.append(f"scale={w}:{h}:force_original_aspect_ratio=decrease:flags=lanczos"
-                         ":in_color_matrix=bt709:out_color_matrix=bt709:out_range=tv")
     if not same:
         steps.append(f"pad={w}:{h}:(ow-iw)/2:(oh-ih)/2:color=black")
     # Метки BT.709 ставятся на сами кадры: новые ffmpeg берут их у кадров, а не из параметров кодировщика
-    steps += ["setsar=1", f"fps={target.fps.numerator}/{target.fps.denominator}", f"format={_pix_fmt(encoder)}",
+    steps += ["setsar=1", f"format={_pix_fmt(encoder)}",
               "setparams=range=tv:color_primaries=bt709:color_trc=bt709:colorspace=bt709"]
     return ",".join(steps)
 
@@ -161,6 +164,8 @@ def encode_chunk(
     src_size: tuple[int, int] | None = None,
     start_frame: int = 0,
     frames: int | None = None,
+    progress=None,
+    stats=None,
 ) -> Path:
     """Кодирует кусок записи без звука: кадры [start_frame, start_frame + frames) на сетке target.fps."""
     out = Path(out).resolve()
@@ -181,6 +186,8 @@ def encode_chunk(
             str(out),
         ],
         cwd=work,
+        progress=progress,
+        stats=stats,
     )
     return out
 
@@ -203,12 +210,12 @@ def concat_video(parts: list[Path], out: Path) -> Path:
     return out
 
 
-def mux(segments: list[Path], audio_wav: Path, out: Path) -> Path:
+def mux(segments: list[Path], audio_wav: Path, out: Path, progress=None) -> Path:
     """Склейка закодированных записей без перекодирования + готовый звук в AAC."""
     lst = concat_list(segments, out.with_name(out.stem + "_segments.txt"))
     ffmpeg([
         "-f", "concat", "-safe", "0", "-i", str(lst), "-i", str(audio_wav),
         "-map", "0:v:0", "-map", "1:a:0", "-c:v", "copy", "-tag:v", "hvc1",
         "-c:a", "aac", "-b:a", "192k", "-movflags", "+faststart", str(out),
-    ])
+    ], progress=progress)
     return out
