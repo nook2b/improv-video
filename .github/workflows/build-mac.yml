@@ -108,7 +108,11 @@ jobs:
         run: |
           V=$(python3 -c "import tomllib; print(tomllib.load(open('pyproject.toml', 'rb'))['project']['version'])")
           if gh release view "v$V" >/dev/null 2>&1; then
-            echo "Релиз v$V уже есть — новый не нужен"
+            T=$(gh release view "v$V" --json targetCommitish -q .targetCommitish)
+            if [ "$T" != "$GITHUB_SHA" ]; then
+              # Номер занят выпуском из другого коммита (например, другой ветки): эта сборка до людей не дойдёт
+              echo "::warning::v$V уже выпущен из коммита ${T:0:7} — эта сборка не выпущена. Если менялся код, поднимите версию"
+            fi
             exit 0
           fi
           shasum -a 256 improv-video-mac.zip > improv-video-mac.zip.sha256
