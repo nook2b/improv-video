@@ -118,9 +118,13 @@ def video_filter(target: Target, encoder: str, lut_name: str | None, adjust: str
     steps = [f"fps={target.fps.numerator}/{target.fps.denominator}"]
     if lut_name:
         if adjust:
-            steps.append(adjust)
-        steps += [f"scale={size}in_range={rng}:in_color_matrix=bt709", "format=gbrp10le",
-                  f"lut3d=file={lut_name}:interp=tetrahedral", "scale=out_color_matrix=bt709:out_range=tv"]
+            # Поправка кривой считается в 10-битных кодах ограниченного диапазона — сначала приводим вход
+            steps += [f"scale={size}in_range={rng}:out_range=tv:in_color_matrix=bt709:out_color_matrix=bt709",
+                      "format=yuv420p10le", adjust, "scale=in_range=tv:in_color_matrix=bt709"]
+        else:
+            steps.append(f"scale={size}in_range={rng}:in_color_matrix=bt709")
+        steps += ["format=gbrp10le", f"lut3d=file={lut_name}:interp=tetrahedral",
+                  "scale=out_color_matrix=bt709:out_range=tv"]
     else:
         steps += [f"scale={size}in_range={rng}:out_range=tv:in_color_matrix=bt709:out_color_matrix=bt709",
                   "format=yuv420p10le"]
@@ -128,7 +132,9 @@ def video_filter(target: Target, encoder: str, lut_name: str | None, adjust: str
             steps.append(adjust)
     if not same:
         steps.append(f"pad={w}:{h}:(ow-iw)/2:(oh-ih)/2:color=black")
-    steps += ["setsar=1", f"format={_pix_fmt(encoder)}"]
+    # Метки BT.709 ставятся на сами кадры: новые ffmpeg берут их у кадров, а не из параметров кодировщика
+    steps += ["setsar=1", f"format={_pix_fmt(encoder)}",
+              "setparams=range=tv:color_primaries=bt709:color_trc=bt709:colorspace=bt709"]
     return ",".join(steps)
 
 

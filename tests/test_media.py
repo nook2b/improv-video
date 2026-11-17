@@ -1,3 +1,4 @@
+import re
 import json
 import subprocess
 from datetime import date
@@ -167,3 +168,26 @@ def test_archive_on_camera_card_is_detected(tmp_path):
     assert is_camera_card(volumes / "HotBaby", volumes)
     assert not is_camera_card(volumes / "Backup" / "improv", volumes)  # внешний диск без DCIM — можно
     assert not is_camera_card(tmp_path / "Movies", volumes)
+
+
+def test_curve_adjust_with_lut_matches_without(tmp_path, identity_lut):
+    """Обычный профиль + LUT: поправка яркости считается на приведённом сигнале, как и без LUT."""
+    from fractions import Fraction
+
+    from improv_video.video import Target, encode_chunk
+
+    src = make_clip(tmp_path / "src.mp4", 1, audio_seconds=0)
+    full = tmp_path / "VID_20261001_100000_00_001.mp4"
+    subprocess.run(["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-i", str(src),
+                    "-vf", "hue=s=0,scale=out_range=pc", "-color_range", "pc", "-c:v", "libx264",
+                    "-preset", "ultrafast", "-pix_fmt", "yuvj420p", str(full)], check=True)
+    target, adjust = Target(640, 360, Fraction(30)), brightness.adjust_filter("normal", 0.5)
+    means = []
+    for name, lut in (("with.mp4", identity_lut), ("without.mp4", None)):
+        out = encode_chunk([full], tmp_path / name, target, "libx265", lut, adjust, "ultrafast", "pc", (640, 360))
+        log = subprocess.run(["ffmpeg", "-hide_banner", "-i", str(out), "-vf",
+                              "signalstats,metadata=print:key=lavfi.signalstats.YAVG", "-f", "null", "-"],
+                             capture_output=True, text=True).stderr
+        vals = [float(v) for v in re.findall(r"YAVG=([\d.]+)", log)]
+        means.append(sum(vals) / len(vals))
+    assert abs(means[0] - means[1]) < 8, means  # в 10-битных кодах
