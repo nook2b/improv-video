@@ -557,6 +557,7 @@ def finish_uploaded(state: State, add_to_playlist: Callable[[str, str], None] | 
         except (NeedsLogin, QuotaExceeded):
             raise
         except ThumbnailNotAllowed as e:
+            Path(row["thumbnail"]).unlink(missing_ok=True)
             state.update_video(row["id"], thumbnail=None)
             notify(str(e))
         except Exception as e:  # noqa: BLE001
@@ -593,7 +594,8 @@ def _trash_copies(folder: Path, names: list[str], trash: Callable[[Path], None])
 
 def trash_done_videos(state: State, days: int, trash: Callable[[Path], None],
                       now: datetime | None = None) -> list[str]:
-    """Файлы роликов, переданных в Studio или загруженных days дней назад и раньше, — в Корзину.
+    """Файлы роликов, переданных в Studio или загруженных days дней назад и раньше, — в Корзину,
+    вместе с копиями их клипов на Mac (если клипы копировались с флешки). Клипы на флешке не трогаем.
     Возвращает названия; days <= 0 — автоудаление выключено."""
     if days <= 0:
         return []
@@ -604,6 +606,8 @@ def trash_done_videos(state: State, days: int, trash: Callable[[Path], None],
         path = Path(row["file"])
         if path.exists():
             trash(path)
+        if path.parent.name == row["day"]:  # копии клипов лежат рядом с роликом, в папке дня архива
+            _trash_copies(path.parent, state.clip_names(row["id"]), trash)
         state.update_video(row["id"], file=None)
         moved.append(title(row["kind"], date.fromisoformat(row["day"]), row["part"]) if row["kind"]
                      else path.name)

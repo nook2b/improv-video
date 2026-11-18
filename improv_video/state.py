@@ -179,6 +179,9 @@ class State:
             "AND done_at IS NOT NULL AND done_at <= ? ORDER BY day, part",
             (moment.isoformat(timespec="seconds"),)).fetchall()
 
+    def clip_names(self, video_id: int) -> list[str]:
+        return [r["name"] for r in self.db.execute("SELECT name FROM clips WHERE video = ?", (video_id,))]
+
     def rebuild_day(self, day: date) -> list[str]:
         """«Собрать заново»: клипы роликов дня снова свободны, старые ролики скрыты из списка.
         Тип дня и плейлист остаются. Возвращает имена клипов."""

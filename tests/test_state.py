@@ -132,3 +132,25 @@ def test_discard_forget_and_hide(tmp_path):
     assert state.days_with_unassigned() == [] and state.failures() == {}
     assert state.is_known("VID_b.mp4", 1)  # при вставке флешки день не появится снова
     assert state.video(up)["status"] == "uploaded"  # на YouTube ничего не меняется
+
+
+def test_trash_done_also_removes_clip_copies(tmp_path):
+    from datetime import date, datetime, timedelta
+
+    from improv_video.pipeline import trash_done_videos
+    from improv_video.state import State
+
+    archive = tmp_path / "Footage"
+    folder = archive / "2026-11-15"
+    folder.mkdir(parents=True)
+    for n in ("VID_a.mp4", "VID_b.mp4", "video.mp4"):
+        (folder / n).write_bytes(b"x")
+    state = State(archive / "state.sqlite")
+    for n in ("VID_a.mp4", "VID_b.mp4"):
+        state.add_clip(n, 1, date(2026, 11, 15))
+    vid, _ = state.create_video(date(2026, 11, 15), ["VID_a.mp4", "VID_b.mp4"], "training")
+    state.update_video(vid, status="uploaded", file=str(folder / "video.mp4"),
+                       done_at=(datetime.now() - timedelta(days=2)).isoformat(timespec="seconds"))
+    gone = []
+    assert trash_done_videos(state, 1, lambda p: gone.append(p.name)) == ["Тренировка 15.11.2026"]
+    assert sorted(gone) == ["VID_a.mp4", "VID_b.mp4", "video.mp4"]
